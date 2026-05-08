@@ -47,7 +47,7 @@ impl WriteAt for File {
 /// Layout constants shared by every fixture. Values chosen to make the
 /// math obvious — single GT, grain 0 lands at a clean sector.
 const CAPACITY_SECTORS: u64 = 2048; // 1 MiB
-const GRAIN_SIZE: u64 = 128;        // 64 KiB
+const GRAIN_SIZE: u64 = 128; // 64 KiB
 const NUM_GTES_PER_GT: u32 = 512;
 const DESC_OFF_SECTOR: u64 = 1;
 const DESC_SIZE_SECTORS: u64 = 1;
@@ -68,7 +68,7 @@ fn build_header() -> [u8; HEADER_SIZE] {
     h[48..56].copy_from_slice(&0u64.to_le_bytes()); // rgd_offset (none)
     h[56..64].copy_from_slice(&GD_OFF_SECTOR.to_le_bytes());
     h[64..72].copy_from_slice(&GRAIN0_OFF_SECTOR.to_le_bytes()); // overhead
-    // Standard VMDK end-of-line markers (cosmetic; reader doesn't care).
+                                                                 // Standard VMDK end-of-line markers (cosmetic; reader doesn't care).
     h[73] = b'\n';
     h[74] = b' ';
     h[75] = b'\r';
@@ -124,7 +124,8 @@ fn build_vmdk(path: &PathBuf, allocate_grain0: bool, grain_pattern: &[u8]) {
     let mut f = File::create(path).unwrap();
     f.set_len(end_of_grain0).unwrap();
     f.write_all_at(&header, 0).unwrap();
-    f.write_all_at(&descriptor, DESC_OFF_SECTOR * SECTOR).unwrap();
+    f.write_all_at(&descriptor, DESC_OFF_SECTOR * SECTOR)
+        .unwrap();
     f.write_all_at(&gd_sector, GD_OFF_SECTOR * SECTOR).unwrap();
     f.write_all_at(&gt_bytes, GT_OFF_SECTOR * SECTOR).unwrap();
     if allocate_grain0 {
@@ -184,7 +185,10 @@ fn unallocated_grain_reads_zero() {
     // Grain 1 starts at virtual byte 64 KiB and is unallocated.
     let mut buf = vec![0xAAu8; 4096];
     r.read_at(GRAIN_SIZE * SECTOR, &mut buf).unwrap();
-    assert!(buf.iter().all(|&b| b == 0), "unallocated grain must read as zero");
+    assert!(
+        buf.iter().all(|&b| b == 0),
+        "unallocated grain must read as zero"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -234,7 +238,8 @@ fn rejects_non_monolithic_sparse() {
     desc[..text.len()].copy_from_slice(text.as_bytes());
 
     let mut f = File::create(&path).unwrap();
-    f.set_len((GRAIN0_OFF_SECTOR + GRAIN_SIZE) * SECTOR).unwrap();
+    f.set_len((GRAIN0_OFF_SECTOR + GRAIN_SIZE) * SECTOR)
+        .unwrap();
     f.write_all_at(&header, 0).unwrap();
     f.write_all_at(&desc, DESC_OFF_SECTOR * SECTOR).unwrap();
     drop(f);
