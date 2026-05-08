@@ -18,16 +18,27 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: rust-img-vmdk
+      - uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-img-vmdk
       - name: build
+        working-directory: rust-img-vmdk
         run: cargo build --all-targets
       - name: test
+        working-directory: rust-img-vmdk
         run: cargo test --all-targets
       - name: clippy
+        working-directory: rust-img-vmdk
         run: cargo clippy --all-targets -- -D warnings
 
   fmt:
