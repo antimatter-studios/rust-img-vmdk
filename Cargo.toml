@@ -1,0 +1,26 @@
+[package]
+name = "am-img-vmdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure-Rust VMDK (VMware Virtual Machine Disk) reader. Monolithic sparse variant. Exposes a Rust API and a C ABI."
+repository = "https://github.com/antimatter-studios/rust-img-vmdk"
+
+[lib]
+name = "vmdk"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+am-fs-core = { path = "../rust-fs-core", version = "0.1" }
+
+[dev-dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "unwind"
+
+[profile.dev]
+opt-level = 1
+panic = "unwind"
