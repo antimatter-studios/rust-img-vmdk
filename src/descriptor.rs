@@ -54,8 +54,7 @@ impl Descriptor {
             // Ignore everything else (ddb.*, encoding, version, CID, ...).
         }
 
-        let create_type = create_type
-            .ok_or(Error::Corrupt("descriptor missing createType"))?;
+        let create_type = create_type.ok_or(Error::Corrupt("descriptor missing createType"))?;
 
         if create_type != "monolithicSparse" {
             // Map known variants to a stable message so callers can log.
@@ -73,7 +72,10 @@ impl Descriptor {
             return Err(Error::Unsupported(msg));
         }
 
-        Ok(Descriptor { create_type, extents })
+        Ok(Descriptor {
+            create_type,
+            extents,
+        })
     }
 }
 

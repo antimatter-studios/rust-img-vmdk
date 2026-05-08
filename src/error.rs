@@ -27,7 +27,10 @@ impl fmt::Display for Error {
             Error::Corrupt(s) => write!(f, "corrupt VMDK: {s}"),
             Error::Unsupported(s) => write!(f, "unsupported VMDK feature: {s}"),
             Error::OutOfBounds { offset, len, size } => {
-                write!(f, "read [{offset}, {offset}+{len}) past virtual size {size}")
+                write!(
+                    f,
+                    "read [{offset}, {offset}+{len}) past virtual size {size}"
+                )
             }
         }
     }

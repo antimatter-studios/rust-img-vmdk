@@ -80,8 +80,8 @@ impl VmdkReader {
         let mut desc_bytes = vec![0u8; desc_byte_len as usize];
         file.seek(SeekFrom::Start(desc_byte_off))?;
         file.read_exact(&mut desc_bytes)?;
-        let desc_text = std::str::from_utf8(&desc_bytes)
-            .map_err(|_| Error::Corrupt("descriptor not UTF-8"))?;
+        let desc_text =
+            std::str::from_utf8(&desc_bytes).map_err(|_| Error::Corrupt("descriptor not UTF-8"))?;
         let _descriptor = Descriptor::parse(desc_text)?;
 
         // Primary grain directory.
@@ -176,8 +176,7 @@ impl VmdkReader {
             let gte_idx = (grain_idx % entries_per_gt) as usize;
 
             let bytes_remaining_in_grain = grain_bytes - in_grain;
-            let chunk_len =
-                std::cmp::min(bytes_remaining_in_grain, end - cursor) as usize;
+            let chunk_len = std::cmp::min(bytes_remaining_in_grain, end - cursor) as usize;
 
             let dst = &mut buf[written..written + chunk_len];
 
@@ -210,12 +209,7 @@ impl VmdkReader {
 
     /// Resolve `gt[gte_idx]`, loading the grain table from disk if it
     /// isn't the one currently cached.
-    fn lookup_grain(
-        &self,
-        gt_idx: usize,
-        gte_idx: usize,
-        gt_sector: u32,
-    ) -> Result<u32> {
+    fn lookup_grain(&self, gt_idx: usize, gte_idx: usize, gt_sector: u32) -> Result<u32> {
         let entries_per_gt = self.header.num_gtes_per_gt as usize;
         let mut cache = self.gt_cache.lock().unwrap();
         if cache.loaded_idx != gt_idx {
@@ -228,9 +222,7 @@ impl VmdkReader {
             }
             let mut entries = Vec::with_capacity(entries_per_gt);
             for chunk in bytes.chunks_exact(4) {
-                entries.push(u32::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3],
-                ]));
+                entries.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
             }
             cache.entries = entries;
             cache.loaded_idx = gt_idx;
