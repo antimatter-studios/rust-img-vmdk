@@ -1,9 +1,9 @@
 [package]
 name = "am-img-vmdk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Pure-Rust VMDK (VMware Virtual Machine Disk) reader. Monolithic sparse variant. Exposes a Rust API and a C ABI."
+description = "Pure-Rust VMDK (VMware Virtual Machine Disk) read+write driver. Monolithic sparse variant, BlockDevice-backed. Exposes a Rust API and a C ABI."
 repository = "https://github.com/antimatter-studios/rust-img-vmdk"
 
 [lib]
