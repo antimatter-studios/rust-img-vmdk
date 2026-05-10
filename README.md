@@ -9,15 +9,21 @@ suitable for FFI from C/C++/Go/Swift.
 
 - [x] `monolithicSparse` (single file: header + embedded descriptor +
       grain directory + grain tables + grain data)
-- [x] `BlockRead` + `BlockDevice` impl via `am-fs-core`
-- [x] C ABI: `vmdk_open(path) -> *mut FsCoreDevice`
+- [x] `BlockRead` + `BlockDevice` impl via `am-fs-core` — generic over
+      any device, not just files
+- [x] C ABI: `vmdk_open` / `vmdk_open_rw` (path) and
+      `vmdk_open_on_device` / `vmdk_open_rw_on_device` (existing
+      `FsCoreDevice` handle)
+- [x] Write support (monolithicSparse): write-through to allocated
+      grains, allocate-on-write for sparse grains, allocate-on-write
+      for grain tables themselves. Crash-safety order is data →
+      grain-table → grain-directory (when growing) → flush.
 - [ ] `monolithicFlat` (single contiguous data file, descriptor in a
       sidecar `.vmdk`)
 - [ ] `twoGbMaxExtentSparse` / `twoGbMaxExtentFlat` (split-extent
       variants used for FAT32 hosts)
 - [ ] `streamOptimized` (DEFLATE-compressed grains used by OVF)
 - [ ] `vmfs` / `vmfsSparse` (ESXi-native; rarely seen outside ESXi)
-- [ ] Write support
 
 Variants other than `monolithicSparse` return a clear "unsupported"
 error rather than misreading the image.

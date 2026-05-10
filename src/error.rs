@@ -6,7 +6,7 @@ use std::io;
 
 #[derive(Debug)]
 pub enum Error {
-    /// Underlying I/O failure (open, seek, read).
+    /// Underlying I/O failure (open, seek, read, write).
     Io(io::Error),
     /// Magic number didn't match `KDMV`.
     NotVmdk,
@@ -17,6 +17,9 @@ pub enum Error {
     Unsupported(&'static str),
     /// Read past the end of the virtual disk.
     OutOfBounds { offset: u64, len: u64, size: u64 },
+    /// `write_at` called on an image opened read-only, or on top of a
+    /// non-writable backing device.
+    ReadOnly,
 }
 
 impl fmt::Display for Error {
@@ -32,6 +35,7 @@ impl fmt::Display for Error {
                     "read [{offset}, {offset}+{len}) past virtual size {size}"
                 )
             }
+            Error::ReadOnly => write!(f, "image was opened read-only"),
         }
     }
 }
