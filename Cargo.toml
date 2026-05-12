@@ -11,7 +11,7 @@ name = "vmdk"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-am-fs-core = { path = "../rust-fs-core", version = "0.1" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2" }
 
 [dev-dependencies]
 
