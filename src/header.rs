@@ -146,4 +146,62 @@ mod tests {
         assert_eq!(p.num_gtes_per_gt, 512);
         assert_eq!(p.gd_offset, 100);
     }
+
+    /// A header with every required field set to a valid value, ready to
+    /// be perturbed by a single test.
+    fn valid_header() -> [u8; HEADER_SIZE] {
+        let mut h = [0u8; HEADER_SIZE];
+        h[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        h[4..8].copy_from_slice(&1u32.to_le_bytes());
+        h[12..20].copy_from_slice(&2048u64.to_le_bytes());
+        h[20..28].copy_from_slice(&128u64.to_le_bytes());
+        h[28..36].copy_from_slice(&1u64.to_le_bytes());
+        h[36..44].copy_from_slice(&20u64.to_le_bytes());
+        h[44..48].copy_from_slice(&512u32.to_le_bytes());
+        h[56..64].copy_from_slice(&100u64.to_le_bytes());
+        h[64..72].copy_from_slice(&7u64.to_le_bytes()); // over_head
+        h
+    }
+
+    #[test]
+    fn rejects_header_shorter_than_512_bytes() {
+        let err = SparseHeader::parse(&[0u8; 100]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_zero_grain_size() {
+        let mut h = valid_header();
+        h[20..28].copy_from_slice(&0u64.to_le_bytes());
+        let err = SparseHeader::parse(&h).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_zero_num_gtes_per_gt() {
+        let mut h = valid_header();
+        h[44..48].copy_from_slice(&0u32.to_le_bytes());
+        let err = SparseHeader::parse(&h).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_compressed_images() {
+        // compress_algorithm @ 77..79; 1 = DEFLATE (streamOptimized).
+        let mut h = valid_header();
+        h[77..79].copy_from_slice(&1u16.to_le_bytes());
+        match SparseHeader::parse(&h).unwrap_err() {
+            Error::Unsupported(_) => {}
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exposes_descriptor_and_directory_offsets() {
+        let p = SparseHeader::parse(&valid_header()).unwrap();
+        assert_eq!(p.descriptor_offset, 1);
+        assert_eq!(p.descriptor_size, 20);
+        assert_eq!(p.over_head, 7);
+        assert_eq!(p.compress_algorithm, 0);
+    }
 }
