@@ -147,4 +147,77 @@ mod tests {
         let text = "version=1\nRW 2048 SPARSE \"x.vmdk\"\n";
         assert!(matches!(Descriptor::parse(text), Err(Error::Corrupt(_))));
     }
+
+    #[test]
+    fn rejects_every_known_unsupported_variant_with_stable_message() {
+        for (ct, msg) in [
+            ("monolithicFlat", "monolithicFlat"),
+            ("twoGbMaxExtentSparse", "twoGbMaxExtentSparse"),
+            ("twoGbMaxExtentFlat", "twoGbMaxExtentFlat"),
+            ("vmfs", "vmfs"),
+            ("vmfsSparse", "vmfsSparse"),
+            ("streamOptimized", "streamOptimized"),
+            ("fullDevice", "fullDevice"),
+            ("partitionedDevice", "partitionedDevice"),
+        ] {
+            let text = format!("createType=\"{ct}\"\n");
+            match Descriptor::parse(&text) {
+                Err(Error::Unsupported(got)) => assert_eq!(got, msg, "for {ct}"),
+                other => panic!("expected Unsupported({msg}) for {ct}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_create_type_maps_to_stable_message() {
+        let text = "createType=\"someFutureType\"\n";
+        match Descriptor::parse(text) {
+            Err(Error::Unsupported(msg)) => assert_eq!(msg, "unknown createType"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tolerates_nul_padding_and_comment_lines() {
+        // Descriptor sector is NUL-padded on disk; comments and blank
+        // lines must be skipped.
+        let mut text = String::from(
+            "# Disk DescriptorFile\n\
+             createType=\"monolithicSparse\"\n\
+             \n\
+             RW 2048 SPARSE \"x.vmdk\"\n",
+        );
+        text.push_str("\0\0\0\0\0\0");
+        let d = Descriptor::parse(&text).unwrap();
+        assert_eq!(d.create_type, "monolithicSparse");
+        assert_eq!(d.extents.len(), 1);
+    }
+
+    #[test]
+    fn parses_readonly_and_noaccess_extent_access_modes() {
+        let text = "createType=\"monolithicSparse\"\n\
+                    RDONLY 2048 SPARSE \"a.vmdk\"\n\
+                    NOACCESS 1024 SPARSE \"b.vmdk\"\n";
+        let d = Descriptor::parse(text).unwrap();
+        assert_eq!(d.extents.len(), 2);
+        assert_eq!(d.extents[0].access, "RDONLY");
+        assert_eq!(d.extents[1].access, "NOACCESS");
+    }
+
+    #[test]
+    fn ignores_malformed_extent_line_with_non_numeric_sectors() {
+        // "RW xyz SPARSE ..." has a non-numeric sector count; parse_extent
+        // returns None and the line is silently ignored, leaving zero
+        // extents (but a valid createType).
+        let text = "createType=\"monolithicSparse\"\nRW xyz SPARSE \"x.vmdk\"\n";
+        let d = Descriptor::parse(text).unwrap();
+        assert_eq!(d.create_type, "monolithicSparse");
+        assert!(d.extents.is_empty());
+    }
+
+    #[test]
+    fn accepts_create_type_without_quotes() {
+        let d = Descriptor::parse("createType=monolithicSparse\n").unwrap();
+        assert_eq!(d.create_type, "monolithicSparse");
+    }
 }
