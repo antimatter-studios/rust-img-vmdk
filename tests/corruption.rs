@@ -38,7 +38,7 @@ const OFF_DESC_OFFSET: u64 = 28;
 const OFF_DESC_SIZE: u64 = 36;
 const OFF_GD_OFFSET: u64 = 56;
 
-fn tmp_path(name: &str) -> PathBuf {
+fn tmp_path(name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
@@ -47,7 +47,27 @@ fn tmp_path(name: &str) -> PathBuf {
         "vmdk_corrupt_{}_{n}_{name}.vmdk",
         std::process::id()
     ));
-    p
+    TempPath(p)
+}
+
+/// RAII temp-file path: removes the backing file on drop so a panicking
+/// assertion can't leak fixtures into the temp dir across CI runs.
+struct TempPath(PathBuf);
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl AsRef<std::path::Path> for TempPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn build_header() -> [u8; HEADER_SIZE] {
@@ -72,7 +92,7 @@ fn descriptor_sector() -> [u8; SECTOR as usize] {
 }
 
 /// Write a valid monolithicSparse VMDK with grain 0 allocated.
-fn build_valid(path: &PathBuf) {
+fn build_valid(path: &std::path::Path) {
     let mut f = File::create(path).unwrap();
     f.set_len(FILE_LEN).unwrap();
     write_at(&mut f, 0, &build_header());
@@ -97,7 +117,7 @@ fn write_at(f: &mut File, off: u64, buf: &[u8]) {
     f.write_all(buf).unwrap();
 }
 
-fn patch(path: &PathBuf, off: u64, bytes: &[u8]) {
+fn patch(path: &std::path::Path, off: u64, bytes: &[u8]) {
     let mut f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -116,7 +136,6 @@ fn valid_image_opens_and_reads_grain() {
     let mut buf = [0u8; 8];
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, [0, 1, 2, 3, 4, 5, 6, 7]);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -128,7 +147,6 @@ fn missing_descriptor_offset_is_unsupported() {
         Err(Error::Unsupported(_)) => {}
         other => panic!("expected Unsupported, got {:?}", other.err()),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -140,7 +158,6 @@ fn descriptor_extending_past_eof_is_corrupt() {
         Err(Error::Corrupt(_)) => {}
         other => panic!("expected Corrupt, got {:?}", other.err()),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -152,7 +169,6 @@ fn zero_grain_directory_offset_is_corrupt() {
         Err(Error::Corrupt(_)) => {}
         other => panic!("expected Corrupt, got {:?}", other.err()),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -164,7 +180,6 @@ fn grain_directory_past_eof_is_corrupt() {
         Err(Error::Corrupt(_)) => {}
         other => panic!("expected Corrupt, got {:?}", other.err()),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -177,7 +192,6 @@ fn non_utf8_descriptor_is_corrupt() {
         Err(Error::Corrupt(_)) => {}
         other => panic!("expected Corrupt, got {:?}", other.err()),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -203,5 +217,4 @@ fn write_into_sparse_grain_persists_across_reopen() {
     let mut head = [0u8; 1024];
     r2.read_at(virt, &mut head).unwrap();
     assert!(head.iter().all(|&b| b == 0));
-    let _ = std::fs::remove_file(&path);
 }
