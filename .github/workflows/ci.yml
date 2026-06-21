@@ -23,6 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          ref: v0.2.2
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,13 +34,13 @@ jobs:
           workspaces: rust-img-vmdk
       - name: build
         working-directory: rust-img-vmdk
-        run: cargo build --all-targets
+        run: cargo build --locked --all-targets
       - name: test
         working-directory: rust-img-vmdk
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
       - name: clippy
         working-directory: rust-img-vmdk
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   fmt:
     name: fmt
@@ -66,9 +67,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          ref: v0.2.2
           path: rust-fs-core
       - name: install qemu-utils
-        run: sudo apt-get update && sudo apt-get install -y qemu-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -77,4 +79,4 @@ jobs:
           workspaces: rust-img-vmdk
       - name: qemu cross-validation tests
         working-directory: rust-img-vmdk
-        run: cargo test --features qemu-validation --test qemu_validation
+        run: cargo test --locked --features qemu-validation --test qemu_validation
