@@ -34,13 +34,13 @@ jobs:
           workspaces: rust-img-vmdk
       - name: build
         working-directory: rust-img-vmdk
-        run: cargo build --all-targets
+        run: cargo build --locked --all-targets
       - name: test
         working-directory: rust-img-vmdk
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets
       - name: clippy
         working-directory: rust-img-vmdk
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   fmt:
     name: fmt
@@ -79,4 +79,4 @@ jobs:
           workspaces: rust-img-vmdk
       - name: qemu cross-validation tests
         working-directory: rust-img-vmdk
-        run: cargo test --features qemu-validation --test qemu_validation
+        run: cargo test --locked --features qemu-validation --test qemu_validation
