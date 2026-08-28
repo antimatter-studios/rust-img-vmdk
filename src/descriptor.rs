@@ -7,6 +7,10 @@
 //!   reported as [`Error::Unsupported`] so callers can fall back.
 //! - The extent line: `RW <sectors> SPARSE "<filename>"`. We stash
 //!   sector count and filename for sanity.
+//! - The parent linkage: `parentFileNameHint` / `parentCID`. A snapshot
+//!   delta or linked clone is `monolithicSparse` like any other image, so
+//!   the parent linkage is the only thing that says the data isn't all
+//!   here. See [`declares_parent`].
 //! - `ddb.*` lines (geometry, etc.) are ignored.
 
 use crate::error::{Error, Result};
@@ -26,10 +30,14 @@ pub struct Extent {
 }
 
 impl Descriptor {
-    /// Parse the descriptor text (NUL-padded okay). Reject anything
-    /// that isn't monolithicSparse so the caller can return Unsupported.
+    /// Parse the descriptor text (NUL-padded okay). Reject anything the
+    /// reader cannot serve truthfully — a `createType` other than
+    /// `monolithicSparse`, or a descriptor that declares a parent — so the
+    /// caller gets [`Error::Unsupported`] and can fall back.
     pub fn parse(text: &str) -> Result<Self> {
         let mut create_type: Option<String> = None;
+        let mut parent_file_name_hint: Option<String> = None;
+        let mut parent_cid: Option<String> = None;
         let mut extents: Vec<Extent> = Vec::new();
 
         for raw in text.lines() {
@@ -45,13 +53,23 @@ impl Descriptor {
                 continue;
             }
 
+            if let Some(value) = parse_kv(line, "parentFileNameHint") {
+                parent_file_name_hint = Some(value);
+                continue;
+            }
+
+            if let Some(value) = parse_kv(line, "parentCID") {
+                parent_cid = Some(value);
+                continue;
+            }
+
             // Extent line: starts with RW / RDONLY / NOACCESS.
             if let Some(extent) = parse_extent(line) {
                 extents.push(extent);
                 continue;
             }
 
-            // Ignore everything else (ddb.*, encoding, version, CID, ...).
+            // Ignore everything else (ddb.*, encoding, version, own CID, ...).
         }
 
         let create_type = create_type.ok_or(Error::Corrupt("descriptor missing createType"))?;
@@ -72,11 +90,49 @@ impl Descriptor {
             return Err(Error::Unsupported(msg));
         }
 
+        // A delta gets this far because it *is* monolithicSparse. Its data
+        // is split between this file and the parent chain, and we can only
+        // see this file — so opening it would serve zeros for everything
+        // the parent still owns.
+        if declares_parent(parent_file_name_hint.as_deref(), parent_cid.as_deref()) {
+            return Err(Error::Unsupported(DELTA_UNSUPPORTED));
+        }
+
         Ok(Descriptor {
             create_type,
             extents,
         })
     }
+}
+
+/// The `parentCID` every standalone disk carries: the sentinel meaning
+/// "no parent". Any other value names a parent this reader cannot reach.
+const NO_PARENT_CID: &str = "ffffffff";
+
+/// What [`Error::Unsupported`] says about a delta. The error type carries
+/// `&'static str`, so the filename can't be interpolated — the message
+/// instead names the fields to look at and the capability that is missing.
+const DELTA_UNSUPPORTED: &str = "delta/child disk — the descriptor names a parent \
+     (parentFileNameHint/parentCID), so part of the data lives in the parent chain; \
+     reading it needs parent-chain following, which this crate does not implement";
+
+/// Whether the descriptor says this image is a snapshot delta or linked
+/// clone: it names a parent file, or carries a `parentCID` other than the
+/// [`NO_PARENT_CID`] sentinel. Absent or empty values mean standalone, and
+/// so does a `0x`-prefixed spelling of the sentinel — a false positive here
+/// would refuse a perfectly ordinary disk.
+fn declares_parent(hint: Option<&str>, cid: Option<&str>) -> bool {
+    let names_a_parent_file = hint.map(str::trim).is_some_and(|h| !h.is_empty());
+
+    let carries_a_child_cid = cid.map(str::trim).is_some_and(|c| {
+        let c = c
+            .strip_prefix("0x")
+            .or_else(|| c.strip_prefix("0X"))
+            .unwrap_or(c);
+        !c.is_empty() && !c.eq_ignore_ascii_case(NO_PARENT_CID)
+    });
+
+    names_a_parent_file || carries_a_child_cid
 }
 
 /// Match `key="value"` (or `key=value`) and return the value if `key`
@@ -219,5 +275,71 @@ mod tests {
     fn accepts_create_type_without_quotes() {
         let d = Descriptor::parse("createType=monolithicSparse\n").unwrap();
         assert_eq!(d.create_type, "monolithicSparse");
+    }
+
+    #[test]
+    fn refuses_delta_disk_named_by_parent_file_name_hint() {
+        // A VMware snapshot delta is `monolithicSparse` too — the only
+        // thing that distinguishes it is the parent linkage. Opening it as
+        // a standalone disk reads every unowned grain as zeros, so it must
+        // be refused rather than half-read.
+        let text = "# Disk DescriptorFile\n\
+                    version=1\n\
+                    CID=fffffffe\n\
+                    parentCID=fffffffd\n\
+                    createType=\"monolithicSparse\"\n\
+                    parentFileNameHint=\"base.vmdk\"\n\
+                    \n\
+                    RW 2048 SPARSE \"base-000001.vmdk\"\n";
+        match Descriptor::parse(text) {
+            Err(Error::Unsupported(msg)) => {
+                assert!(
+                    msg.contains("parent"),
+                    "message must name the parent: {msg}"
+                )
+            }
+            other => panic!("expected Unsupported for a delta disk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_delta_disk_identified_only_by_parent_cid() {
+        // Some producers omit the hint but still record a child CID.
+        let text = "createType=\"monolithicSparse\"\n\
+                    parentCID=1a2b3c4d\n\
+                    RW 2048 SPARSE \"child.vmdk\"\n";
+        match Descriptor::parse(text) {
+            Err(Error::Unsupported(msg)) => {
+                assert!(
+                    msg.contains("parent"),
+                    "message must name the parent: {msg}"
+                )
+            }
+            other => panic!("expected Unsupported for a child CID, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn standalone_disk_with_sentinel_parent_cid_still_parses() {
+        // `ffffffff` is the "no parent" sentinel every standalone VMware
+        // disk carries, in either spelling; refusing it would break every
+        // ordinary image.
+        for cid in ["ffffffff", "FFFFFFFF", "0xffffffff"] {
+            let text = format!(
+                "createType=\"monolithicSparse\"\nparentCID={cid}\nRW 2048 SPARSE \"x.vmdk\"\n"
+            );
+            let d = Descriptor::parse(&text)
+                .unwrap_or_else(|e| panic!("parentCID={cid} must parse, got {e:?}"));
+            assert_eq!(d.extents.len(), 1);
+        }
+    }
+
+    #[test]
+    fn empty_parent_file_name_hint_is_not_a_parent() {
+        let text = "createType=\"monolithicSparse\"\n\
+                    parentFileNameHint=\"\"\n\
+                    RW 2048 SPARSE \"x.vmdk\"\n";
+        let d = Descriptor::parse(text).unwrap();
+        assert_eq!(d.extents.len(), 1);
     }
 }

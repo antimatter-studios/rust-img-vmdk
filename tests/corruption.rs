@@ -91,6 +91,18 @@ fn descriptor_sector() -> [u8; SECTOR as usize] {
     s
 }
 
+/// A snapshot delta's descriptor: same `createType` as the baseline, but
+/// it names a parent, so the grains it doesn't own live in that parent.
+fn delta_descriptor_sector() -> [u8; SECTOR as usize] {
+    let text = "createType=\"monolithicSparse\"\n\
+                parentCID=fffffffd\n\
+                parentFileNameHint=\"corrupt.vmdk\"\n\
+                RW 2048 SPARSE \"corrupt-000001.vmdk\"\n";
+    let mut s = [0u8; SECTOR as usize];
+    s[..text.len()].copy_from_slice(text.as_bytes());
+    s
+}
+
 /// Write a valid monolithicSparse VMDK with grain 0 allocated.
 fn build_valid(path: &std::path::Path) {
     let mut f = File::create(path).unwrap();
@@ -217,4 +229,29 @@ fn write_into_sparse_grain_persists_across_reopen() {
     let mut head = [0u8; 1024];
     r2.read_at(virt, &mut head).unwrap();
     assert!(head.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn delta_disk_declaring_a_parent_is_refused_at_open() {
+    // The image is structurally a perfectly good monolithicSparse VMDK —
+    // only the descriptor's parent linkage says the data isn't all here.
+    // Opening it would report the full virtual size and serve zeros for
+    // every grain the delta doesn't own, which a caller cannot detect.
+    let path = tmp_path("delta");
+    build_valid(&path);
+    patch(&path, DESC_OFF_SECTOR * SECTOR, &delta_descriptor_sector());
+    match VmdkReader::open(&path) {
+        Err(Error::Unsupported(msg)) => {
+            assert!(
+                msg.contains("parent"),
+                "message must name the parent: {msg}"
+            )
+        }
+        Ok(r) => panic!(
+            "delta disk opened as a standalone {}-byte image — every grain it \
+             does not own would silently read as zeros",
+            r.virtual_size()
+        ),
+        Err(other) => panic!("expected Unsupported for a delta disk, got {other:?}"),
+    }
 }
