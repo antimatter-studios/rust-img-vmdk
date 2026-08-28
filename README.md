@@ -26,7 +26,10 @@ suitable for FFI from C/C++/Go/Swift.
 - [ ] `vmfs` / `vmfsSparse` (ESXi-native; rarely seen outside ESXi)
 
 Variants other than `monolithicSparse` return a clear "unsupported"
-error rather than misreading the image.
+error rather than misreading the image. So does a snapshot delta or
+linked clone: it *is* `monolithicSparse`, but its descriptor names a
+parent (`parentFileNameHint` / `parentCID`) and the grains it does not
+own live in that parent, so reading it standalone would return zeros.
 
 ## Layout
 
