@@ -18,21 +18,19 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
 
 use vmdk::header::{HEADER_SIZE, MAGIC};
 use vmdk::VmdkReader;
 
-const SECTOR: u64 = 512;
+mod common;
+use common::TempPath;
 
-fn tmp_path(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!("vmdk_synth_{}_{n}_{name}.vmdk", std::process::id()));
-    p
+/// Self-deleting, so a panicking assertion leaves nothing behind.
+fn tmp_path(name: &str) -> TempPath {
+    TempPath::new(&format!("synth_{name}"))
 }
+
+const SECTOR: u64 = 512;
 
 trait WriteAt {
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> std::io::Result<()>;
@@ -98,7 +96,7 @@ fn build_descriptor_sector() -> [u8; SECTOR as usize] {
 /// Build a 1 MiB sparse VMDK. If `allocate_grain0` is true, grain 0 is
 /// linked from the grain table and filled with `grain_pattern`. Otherwise
 /// no grains are allocated (every read should return zero).
-fn build_vmdk(path: &PathBuf, allocate_grain0: bool, grain_pattern: &[u8]) {
+fn build_vmdk(path: &std::path::Path, allocate_grain0: bool, grain_pattern: &[u8]) {
     let header = build_header();
     let descriptor = build_descriptor_sector();
 
