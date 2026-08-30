@@ -89,6 +89,19 @@ struct GtCache {
     entries: Vec<u32>,
 }
 
+/// A byte offset resolved into the grain hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrainAddress {
+    /// Offset within the grain.
+    in_grain: u64,
+    /// Index of the grain table in the grain directory.
+    gt_idx: usize,
+    /// Index of the grain within that table.
+    gte_idx: usize,
+    /// How many bytes of the caller's range this grain can serve.
+    chunk_len: usize,
+}
+
 impl VmdkReader {
     /// Open `path` read-only and parse the sparse header + descriptor +
     /// grain directory. Internally wraps the file in a
@@ -269,9 +282,6 @@ impl VmdkReader {
             });
         }
 
-        let grain_bytes = self.grain_size_bytes();
-        let entries_per_gt = self.header.num_gtes_per_gt as u64;
-
         // Walk grain by grain. Each grain either: (a) has a host
         // location (gd[gt] != 0 and gt[gte] != 0) → read straight from
         // disk, or (b) is unallocated → fill destination with zero.
@@ -279,23 +289,14 @@ impl VmdkReader {
         let mut written: usize = 0;
 
         while cursor < end {
-            let in_grain = cursor % grain_bytes;
-            let grain_idx = cursor / grain_bytes;
-            let gt_idx = (grain_idx / entries_per_gt) as usize;
-            let gte_idx = (grain_idx % entries_per_gt) as usize;
-
-            let bytes_remaining_in_grain = grain_bytes - in_grain;
-            let chunk_len = std::cmp::min(bytes_remaining_in_grain, end - cursor) as usize;
-
+            let GrainAddress {
+                in_grain,
+                gt_idx,
+                gte_idx,
+                chunk_len,
+            } = self.grain_address(cursor, end);
             let dst = &mut buf[written..written + chunk_len];
-
-            let gt_sector = {
-                let gd = self.gd.lock().unwrap();
-                if gt_idx >= gd.len() {
-                    return Err(Error::Corrupt("gt_idx past grain directory"));
-                }
-                gd[gt_idx]
-            };
+            let gt_sector = self.gd_entry(gt_idx)?;
 
             if gt_sector == 0 {
                 // Whole grain table unallocated — region reads as zero.
@@ -315,6 +316,40 @@ impl VmdkReader {
         }
 
         Ok(())
+    }
+
+    /// Where a byte offset falls in the grain hierarchy, and how much
+    /// of the caller's range this grain can serve.
+    ///
+    /// `read_at` and `write_at` each computed these five values the
+    /// same way, then diverged — the reader zero-fills an unallocated
+    /// grain, the writer allocates one. The divergence is the whole
+    /// point of the two functions; the arithmetic in front of it is not,
+    /// and two copies of an index calculation is how one of them ends up
+    /// off by a level.
+    fn grain_address(&self, cursor: u64, end: u64) -> GrainAddress {
+        let grain_bytes = self.grain_size_bytes();
+        let entries_per_gt = self.header.num_gtes_per_gt as u64;
+        let in_grain = cursor % grain_bytes;
+        let grain_idx = cursor / grain_bytes;
+        GrainAddress {
+            in_grain,
+            gt_idx: (grain_idx / entries_per_gt) as usize,
+            gte_idx: (grain_idx % entries_per_gt) as usize,
+            chunk_len: std::cmp::min(grain_bytes - in_grain, end - cursor) as usize,
+        }
+    }
+
+    /// The grain directory's entry for `gt_idx`, bounds-checked.
+    ///
+    /// Zero means the whole grain table is unallocated — which the
+    /// reader answers with zeros and the writer answers by allocating.
+    fn gd_entry(&self, gt_idx: usize) -> Result<u32> {
+        let gd = self.gd.lock().unwrap();
+        if gt_idx >= gd.len() {
+            return Err(Error::Corrupt("gt_idx past grain directory"));
+        }
+        Ok(gd[gt_idx])
     }
 
     /// Resolve `gt[gte_idx]`, loading the grain table from disk if it
@@ -372,30 +407,21 @@ impl VmdkReader {
         }
 
         let grain_bytes = self.grain_size_bytes();
-        let entries_per_gt = self.header.num_gtes_per_gt as u64;
-
         let mut cursor = offset;
         let mut written: usize = 0;
 
         while cursor < end {
-            let in_grain = cursor % grain_bytes;
-            let grain_idx = cursor / grain_bytes;
-            let gt_idx = (grain_idx / entries_per_gt) as usize;
-            let gte_idx = (grain_idx % entries_per_gt) as usize;
-
-            let bytes_remaining_in_grain = grain_bytes - in_grain;
-            let chunk_len = std::cmp::min(bytes_remaining_in_grain, end - cursor) as usize;
+            let GrainAddress {
+                in_grain,
+                gt_idx,
+                gte_idx,
+                chunk_len,
+            } = self.grain_address(cursor, end);
             let src = &buf[written..written + chunk_len];
 
-            // Resolve current GT pointer. When zero we have to allocate
-            // a fresh grain table before the grain itself.
-            let gt_sector = {
-                let gd = self.gd.lock().unwrap();
-                if gt_idx >= gd.len() {
-                    return Err(Error::Corrupt("gt_idx past grain directory"));
-                }
-                gd[gt_idx]
-            };
+            // Zero means the whole grain table is unallocated, so one
+            // has to exist before the grain inside it can.
+            let gt_sector = self.gd_entry(gt_idx)?;
 
             let gt_sector = if gt_sector == 0 {
                 self.allocate_grain_table(gt_idx)?

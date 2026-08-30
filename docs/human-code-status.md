@@ -23,10 +23,36 @@ Accurate: nine arms that map a string to itself. Replacing it with a type is
 right, and it changes how the descriptor's parsed form is represented — a design
 choice about the crate's internal model.
 
-### H2 — `read_at` and `write_at` carry two copies of the grain-address walk — **fixable, not yet done**
+### H2 — `read_at` and `write_at` carried two copies of the grain-address walk — **fixed**
 
-Genuine duplication. Deferred as one deduplication change with the synthetic
-tests as the contract, rather than folded into a pass that is mostly names.
+Both computed `in_grain`, `grain_idx`, `gt_idx`, `gte_idx` and `chunk_len` the
+same way, and both bounds-checked the grain directory the same way — then
+diverged, correctly: the reader zero-fills an unallocated grain, the writer
+allocates one.
+
+`grain_address` and `gd_entry` carry the shared half; the divergence stays where
+it belongs. Two copies of an index calculation is how one of them ends up off by
+a level, and this one has two levels to be off by.
+
+Both walks were covered before — swapping `gt_idx` and `gte_idx` in either failed
+2 tests — which is what made consolidating them safe rather than merely tidy.
+
+### M4, M5 — triplicated fixture builders; two test files leak fixtures on panic — **fixed**
+
+**M5 first, because it is the one with a consequence.** `corruption.rs` and
+`qemu_validation.rs` each had a `TempPath` with a `Drop`. `synthetic.rs` and
+`write.rs` returned a bare `PathBuf` and removed it at the end of the happy path
+— so **any assertion that panicked left a `.vmdk` behind**, and the failure path
+is exactly when a fixture is most likely to be abandoned and least likely to be
+noticed, because attention is on the failure.
+
+`tests/common/mod.rs` holds one self-deleting `TempPath` and the portable
+`WriteAt`. The proof is a test rather than an assertion about intent: it runs a
+panicking closure under `catch_unwind` and then requires the temp directory to
+hold nothing named for it. Disabling the `Drop` fails it.
+
+M4's builders now share that harness and take `&Path` rather than `&PathBuf`, so
+a fixture type can change without touching them.
 
 ### H3 — the parsed descriptor is discarded, and the doc says otherwise — **fixed earlier**
 
@@ -125,6 +151,6 @@ behind. They are one change together, in `tests/common/mod.rs`.
 
 ## Verification
 
-42 tests pass across all binaries, unchanged in number. `chore lint` clean.
+43 tests pass across all binaries, up from 42. `chore lint` clean.
 Nothing here changes behaviour except M10, which refuses an input that
 previously wrapped past a bounds check.

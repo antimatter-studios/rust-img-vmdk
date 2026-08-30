@@ -14,12 +14,19 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use fs_core::{BlockDevice, BlockRead, FileDevice};
 use vmdk::header::{HEADER_SIZE, MAGIC};
 use vmdk::VmdkReader;
+
+mod common;
+use common::TempPath;
+
+/// Self-deleting, so a panicking assertion leaves nothing behind.
+fn tmp_path(name: &str) -> TempPath {
+    TempPath::new(&format!("write_{name}"))
+}
 
 const SECTOR: u64 = 512;
 
@@ -33,15 +40,6 @@ const DESC_SIZE_SECTORS: u64 = 1;
 const GD_OFF_SECTOR: u64 = 2;
 const GT_OFF_SECTOR: u64 = 3;
 const GRAIN0_OFF_SECTOR: u64 = 7;
-
-fn tmp_path(name: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!("vmdk_write_{}_{n}_{name}.vmdk", std::process::id()));
-    p
-}
 
 trait WriteAt {
     fn write_all_at(&mut self, buf: &[u8], offset: u64) -> std::io::Result<()>;
@@ -89,7 +87,7 @@ fn build_descriptor_sector() -> [u8; SECTOR as usize] {
 /// (linked from a populated grain table). Every other grain inside that
 /// GT is sparse; the GD has just the one entry pointing at GT 0 — there
 /// are no other GT slots to consider in this fixture (gt_count == 1).
-fn build_grain0_only(path: &PathBuf, grain0_pattern: &[u8]) {
+fn build_grain0_only(path: &std::path::Path, grain0_pattern: &[u8]) {
     let header = build_header();
     let descriptor = build_descriptor_sector();
 
@@ -125,7 +123,7 @@ fn build_grain0_only(path: &PathBuf, grain0_pattern: &[u8]) {
 /// count straddles two GTs (entries_per_gt = 512, grain_size = 128
 /// sectors → one GT covers 512*128 = 65_536 sectors = 32 MiB). Set
 /// capacity to 64 MiB = 131_072 sectors so we get exactly 2 GTs.
-fn build_fully_sparse_two_gts(path: &PathBuf) {
+fn build_fully_sparse_two_gts(path: &std::path::Path) {
     const CAP: u64 = 131_072; // 64 MiB
     let mut h = [0u8; HEADER_SIZE];
     h[0..4].copy_from_slice(&MAGIC.to_le_bytes());
@@ -158,7 +156,7 @@ fn build_fully_sparse_two_gts(path: &PathBuf) {
     f.write_all_at(&gd_sector, GD_OFF_SECTOR * SECTOR).unwrap();
 }
 
-fn read_grain_sector_value(path: &PathBuf, gt_sector: u32, gte_idx: u64) -> u32 {
+fn read_grain_sector_value(path: &std::path::Path, gt_sector: u32, gte_idx: u64) -> u32 {
     let mut f = File::open(path).unwrap();
     let off = (gt_sector as u64) * SECTOR + gte_idx * 4;
     f.seek(SeekFrom::Start(off)).unwrap();
@@ -167,7 +165,7 @@ fn read_grain_sector_value(path: &PathBuf, gt_sector: u32, gte_idx: u64) -> u32 
     u32::from_le_bytes(bytes)
 }
 
-fn read_gd_entry(path: &PathBuf, idx: u64) -> u32 {
+fn read_gd_entry(path: &std::path::Path, idx: u64) -> u32 {
     let mut f = File::open(path).unwrap();
     let off = GD_OFF_SECTOR * SECTOR + idx * 4;
     f.seek(SeekFrom::Start(off)).unwrap();
