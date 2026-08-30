@@ -33,10 +33,14 @@ const GT_OFF_SECTOR: u64 = 3;
 const GRAIN0_OFF_SECTOR: u64 = 7;
 const FILE_LEN: u64 = (GRAIN0_OFF_SECTOR + GRAIN_SIZE) * SECTOR;
 
-// Header field offsets corrupted by individual tests.
-const OFF_DESC_OFFSET: u64 = 28;
-const OFF_DESC_SIZE: u64 = 36;
-const OFF_GD_OFFSET: u64 = 56;
+// Header field offsets corrupted by individual tests, taken from the
+// parser's own table rather than restated here. A test that corrupts
+// "the descriptor offset" should corrupt whatever the parser reads as
+// the descriptor offset — if the two ever disagree, the test passes
+// while corrupting a neighbouring field.
+const OFF_DESC_OFFSET: u64 = vmdk::header::offsets::DESCRIPTOR_OFFSET as u64;
+const OFF_DESC_SIZE: u64 = vmdk::header::offsets::DESCRIPTOR_SIZE as u64;
+const OFF_GD_OFFSET: u64 = vmdk::header::offsets::GD_OFFSET as u64;
 
 fn tmp_path(name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};

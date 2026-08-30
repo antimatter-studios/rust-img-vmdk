@@ -86,11 +86,40 @@ Whether to use them or drop them depends on what this crate intends to support.
 Both are restructures of paths that establish or depend on invariants, with no
 behavioural test covering the seams.
 
-### M3, M4, M5 — header offsets duplicated four ways; triplicated fixture builders; two test files leak fixtures on panic — **fixable, not yet done**
+### M3 — header field offsets were bare numerals — **fixed**
 
-All genuine. M5 in particular is worth doing — a panicking assertion leaves a
-temp file behind — but all three are the same kind of mechanical change and
-belong together.
+Thirteen offsets written as literals in `SparseHeader::parse`, decodable only
+against the ASCII table in the module doc — which is good documentation and is
+not the same as a name. A literal in a parse expression carries no way to tell a
+correct offset from a typo; a name can be checked against the table by eye.
+
+**`compressAlgorithm` at 77 is the one that matters.** It is where the
+compression flag lives, so reading it from the wrong place means silently
+accepting a `streamOptimized` image as an ordinary one, and then decoding its
+grains as raw data. Its doc now says why 77 looks wrong and is not: four
+single-byte end-of-line fields sit at 73..=76, so the word is unaligned by the
+format's own doing.
+
+**The need had already been felt and half-met.** `tests/corruption.rs` named
+three of these itself — in a test file, invisible to the parser that also needed
+them. They now come from the parser's table, so a test that corrupts "the
+descriptor offset" corrupts whatever the parser reads as the descriptor offset.
+If the two ever disagreed, the test would pass while corrupting a neighbouring
+field.
+
+The module is `pub`, not `pub(crate)` as the report suggested — integration tests
+compile as a separate crate, so `pub(crate)` cannot reach them, and the two
+halves of that suggestion contradict each other. Public is the right call anyway
+for a format crate: the layout is already published as a drawing in this module's
+documentation, so naming the offsets commits to nothing the drawing did not.
+
+Mutation-checked: `COMPRESS_ALGORITHM` 77→78, `GD_OFFSET` 56→48 and
+`DESCRIPTOR_SIZE` 36→44 each fail 2 tests.
+
+### M4, M5 — triplicated fixture builders; two test files leak fixtures on panic — **fixable, not yet done**
+
+Both genuine, and M5 is worth doing — a panicking assertion leaves a temp file
+behind. They are one change together, in `tests/common/mod.rs`.
 
 ---
 

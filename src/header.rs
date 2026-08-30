@@ -45,27 +45,85 @@ pub struct SparseHeader {
     pub compress_algorithm: u16,
 }
 
+/// Byte offsets of each field within the on-disk `SparseExtentHeader`.
+///
+/// The module documentation above draws the structure as an ASCII
+/// table, which is good documentation and is not the same as a name: a
+/// numeric literal in a parse expression carries no way to tell a
+/// correct offset from a typo, while a name can be checked against the
+/// table by eye.
+///
+/// **`COMPRESS_ALGORITHM` is the one that matters most.** It is where
+/// the compression flag lives, so reading it from the wrong place means
+/// silently accepting a `streamOptimized` image as an ordinary one —
+/// and then decoding its grains as raw data.
+///
+/// `tests/corruption.rs` had already felt the need and half-met it,
+/// naming three of these in a test file where the parser that also
+/// needs them could not see them.
+///
+/// The module is `pub` rather than `pub(crate)` precisely so those
+/// tests can import it: integration tests compile as a separate crate.
+/// That makes it public surface, which is the right call for a format
+/// crate — the layout is already published as an ASCII table in this
+/// module's own documentation, so naming the offsets adds no
+/// commitment that the drawing did not already make.
+pub mod offsets {
+    /// `magicNumber` — `KDMV`.
+    pub const MAGIC: usize = 0;
+    /// `version`.
+    pub const VERSION: usize = 4;
+    /// `flags`.
+    pub const FLAGS: usize = 8;
+    /// `capacity`, in sectors.
+    pub const CAPACITY: usize = 12;
+    /// `grainSize`, in sectors.
+    pub const GRAIN_SIZE: usize = 20;
+    /// `descriptorOffset`, in sectors.
+    pub const DESCRIPTOR_OFFSET: usize = 28;
+    /// `descriptorSize`, in sectors.
+    pub const DESCRIPTOR_SIZE: usize = 36;
+    /// `numGTEsPerGT`.
+    pub const NUM_GTES_PER_GT: usize = 44;
+    /// `rgdOffset` — redundant grain directory, in sectors.
+    pub const RGD_OFFSET: usize = 48;
+    /// `gdOffset` — grain directory, in sectors.
+    pub const GD_OFFSET: usize = 56;
+    /// `overHead`, in sectors.
+    pub const OVER_HEAD: usize = 64;
+    /// `uncleanShutdown` — one byte.
+    pub const UNCLEAN_SHUTDOWN: usize = 72;
+    /// `compressAlgorithm`.
+    ///
+    /// Not 76: the four single-byte `singleEndLineChar` /
+    /// `nonEndLineChar` / `doubleEndLineChar1` / `doubleEndLineChar2`
+    /// fields sit at 73..=76, so the compression word starts at 77 and
+    /// is therefore **unaligned**. That is the format's doing, and it is
+    /// why this offset looks wrong at a glance and is not.
+    pub const COMPRESS_ALGORITHM: usize = 77;
+}
+
 impl SparseHeader {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < HEADER_SIZE {
             return Err(Error::Corrupt("header shorter than 512 bytes"));
         }
-        let magic = read_u32(bytes, 0);
+        let magic = read_u32(bytes, offsets::MAGIC);
         if magic != MAGIC {
             return Err(Error::NotVmdk);
         }
-        let version = read_u32(bytes, 4);
-        let flags = read_u32(bytes, 8);
-        let capacity = read_u64(bytes, 12);
-        let grain_size = read_u64(bytes, 20);
-        let descriptor_offset = read_u64(bytes, 28);
-        let descriptor_size = read_u64(bytes, 36);
-        let num_gtes_per_gt = read_u32(bytes, 44);
-        let rgd_offset = read_u64(bytes, 48);
-        let gd_offset = read_u64(bytes, 56);
-        let over_head = read_u64(bytes, 64);
-        let unclean_shutdown = bytes[72];
-        let compress_algorithm = read_u16(bytes, 77);
+        let version = read_u32(bytes, offsets::VERSION);
+        let flags = read_u32(bytes, offsets::FLAGS);
+        let capacity = read_u64(bytes, offsets::CAPACITY);
+        let grain_size = read_u64(bytes, offsets::GRAIN_SIZE);
+        let descriptor_offset = read_u64(bytes, offsets::DESCRIPTOR_OFFSET);
+        let descriptor_size = read_u64(bytes, offsets::DESCRIPTOR_SIZE);
+        let num_gtes_per_gt = read_u32(bytes, offsets::NUM_GTES_PER_GT);
+        let rgd_offset = read_u64(bytes, offsets::RGD_OFFSET);
+        let gd_offset = read_u64(bytes, offsets::GD_OFFSET);
+        let over_head = read_u64(bytes, offsets::OVER_HEAD);
+        let unclean_shutdown = bytes[offsets::UNCLEAN_SHUTDOWN];
+        let compress_algorithm = read_u16(bytes, offsets::COMPRESS_ALGORITHM);
 
         if grain_size == 0 {
             return Err(Error::Corrupt("grain_size is zero"));
