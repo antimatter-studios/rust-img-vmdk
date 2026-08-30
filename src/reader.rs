@@ -41,7 +41,17 @@ use fs_core::{BlockDevice, FileDevice};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-const SECTOR_SIZE: u64 = 512;
+/// Bytes per sector. `pub` because the test fixtures build images in
+/// sector units and were each redeclaring their own copy.
+pub const SECTOR_SIZE: u64 = 512;
+
+/// Bytes per grain-directory and grain-table entry.
+///
+/// Both tables are arrays of little-endian `u32` sector numbers, so the
+/// same 4 governs the length of a GD, the length of a GT, and the offset
+/// of any entry within either. It appeared as a bare literal at six
+/// sites, where it is indistinguishable from an unrelated 4.
+const GD_GT_ENTRY_SIZE: u64 = 4;
 
 pub struct VmdkReader {
     /// Backing block device. All host-offset reads/writes go through here.
@@ -71,7 +81,11 @@ pub struct VmdkReader {
 
 struct GtCache {
     /// Index into `gd` of the table currently held; `usize::MAX` if empty.
-    loaded_idx: usize,
+    /// Which grain table is in `entries`, or `None` if nothing is.
+    ///
+    /// Was `usize::MAX` as a sentinel, which every read had to know
+    /// about and no type enforced.
+    loaded_idx: Option<usize>,
     entries: Vec<u32>,
 }
 
@@ -134,7 +148,14 @@ impl VmdkReader {
             .descriptor_size
             .checked_mul(SECTOR_SIZE)
             .ok_or(Error::Corrupt("descriptor_size overflow"))?;
-        if desc_byte_off + desc_byte_len > dev_size {
+        // Checked, like the two multiplications above it. Both operands
+        // are attacker-supplied sector counts scaled to bytes, so the sum
+        // can overflow even when neither product did — and an overflowing
+        // sum wraps to a small number that passes the EOF test.
+        let desc_end = desc_byte_off
+            .checked_add(desc_byte_len)
+            .ok_or(Error::Corrupt("descriptor extent overflow"))?;
+        if desc_end > dev_size {
             return Err(Error::Corrupt("descriptor extends past EOF"));
         }
         let mut desc_bytes = vec![0u8; desc_byte_len as usize];
@@ -160,8 +181,11 @@ impl VmdkReader {
             .gd_offset
             .checked_mul(SECTOR_SIZE)
             .ok_or(Error::Corrupt("gd_offset overflow"))?;
-        let gd_byte_len = (gt_count * 4) as usize;
-        if (gd_byte_off + gd_byte_len as u64) > dev_size {
+        let gd_byte_len = (gt_count * GD_GT_ENTRY_SIZE) as usize;
+        let gd_end = gd_byte_off
+            .checked_add(gd_byte_len as u64)
+            .ok_or(Error::Corrupt("grain-directory extent overflow"))?;
+        if gd_end > dev_size {
             return Err(Error::Corrupt("grain directory extends past EOF"));
         }
 
@@ -188,7 +212,7 @@ impl VmdkReader {
             header,
             gd: Mutex::new(gd),
             gt_cache: Mutex::new(GtCache {
-                loaded_idx: usize::MAX,
+                loaded_idx: None,
                 entries: Vec::new(),
             }),
             virtual_size,
@@ -298,8 +322,8 @@ impl VmdkReader {
     fn lookup_grain(&self, gt_idx: usize, gte_idx: usize, gt_sector: u32) -> Result<u32> {
         let entries_per_gt = self.header.num_gtes_per_gt as usize;
         let mut cache = self.gt_cache.lock().unwrap();
-        if cache.loaded_idx != gt_idx {
-            let mut bytes = vec![0u8; entries_per_gt * 4];
+        if cache.loaded_idx != Some(gt_idx) {
+            let mut bytes = vec![0u8; entries_per_gt * GD_GT_ENTRY_SIZE as usize];
             let off = (gt_sector as u64) * SECTOR_SIZE;
             self.dev_read(off, &mut bytes)?;
             let mut entries = Vec::with_capacity(entries_per_gt);
@@ -307,7 +331,7 @@ impl VmdkReader {
                 entries.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
             }
             cache.entries = entries;
-            cache.loaded_idx = gt_idx;
+            cache.loaded_idx = Some(gt_idx);
         }
         if gte_idx >= cache.entries.len() {
             return Err(Error::Corrupt("gte_idx past grain table"));
@@ -458,7 +482,7 @@ impl VmdkReader {
     fn allocate_grain_table(&self, gt_idx: usize) -> Result<u32> {
         let entries_per_gt = self.header.num_gtes_per_gt as u64;
         // Each entry is 4 bytes; round up to whole sectors.
-        let gt_bytes = entries_per_gt * 4;
+        let gt_bytes = entries_per_gt * GD_GT_ENTRY_SIZE;
         let gt_sectors = gt_bytes.div_ceil(SECTOR_SIZE);
         let new_gt_sector_u64 = self.allocate_sectors(gt_sectors)?;
         if new_gt_sector_u64 > u32::MAX as u64 {
@@ -479,7 +503,8 @@ impl VmdkReader {
             if gt_idx >= gd.len() {
                 return Err(Error::Corrupt("gt_idx past grain directory"));
             }
-            let gd_entry_off = self.header.gd_offset * SECTOR_SIZE + (gt_idx as u64) * 4;
+            let gd_entry_off =
+                self.header.gd_offset * SECTOR_SIZE + (gt_idx as u64) * GD_GT_ENTRY_SIZE;
             let bytes = new_gt_sector.to_le_bytes();
             self.dev_write(gd_entry_off, &bytes)?;
             self.dev_flush()?;
@@ -490,8 +515,8 @@ impl VmdkReader {
         // (it can't have meaningful contents — the GT was just zeroed —
         // but being defensive avoids a stale-cache surprise).
         let mut cache = self.gt_cache.lock().unwrap();
-        if cache.loaded_idx == gt_idx {
-            cache.loaded_idx = usize::MAX;
+        if cache.loaded_idx == Some(gt_idx) {
+            cache.loaded_idx = None;
             cache.entries.clear();
         }
 
@@ -507,13 +532,13 @@ impl VmdkReader {
         gt_sector: u32,
         new_grain_sector: u32,
     ) -> Result<()> {
-        let entry_off = (gt_sector as u64) * SECTOR_SIZE + (gte_idx as u64) * 4;
+        let entry_off = (gt_sector as u64) * SECTOR_SIZE + (gte_idx as u64) * GD_GT_ENTRY_SIZE;
         let bytes = new_grain_sector.to_le_bytes();
         self.dev_write(entry_off, &bytes)?;
         self.dev_flush()?;
 
         let mut cache = self.gt_cache.lock().unwrap();
-        if cache.loaded_idx == gt_idx && gte_idx < cache.entries.len() {
+        if cache.loaded_idx == Some(gt_idx) && gte_idx < cache.entries.len() {
             cache.entries[gte_idx] = new_grain_sector;
         }
         Ok(())
