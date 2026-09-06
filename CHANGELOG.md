@@ -7,6 +7,14 @@ never does.
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-09-06
+
+### Fixed
+
+- A grain size that multiplies out to zero is refused. The descriptor
+  states a grain in sectors; zero, or a value that wraps when turned
+  into bytes, made the first read divide by zero.
+
 ## [0.3.4] — 2026-09-04
 
 ### Changed
