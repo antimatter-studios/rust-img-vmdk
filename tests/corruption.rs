@@ -259,3 +259,54 @@ fn delta_disk_declaring_a_parent_is_refused_at_open() {
         Err(other) => panic!("expected Unsupported for a delta disk, got {other:?}"),
     }
 }
+
+const OFF_GRAIN_SIZE: u64 = vmdk::header::offsets::GRAIN_SIZE as u64;
+const OFF_NUM_GTES_PER_GT: u64 = vmdk::header::offsets::NUM_GTES_PER_GT as u64;
+
+/// `grain_size` is a sector count, and the reader turns it into bytes
+/// by multiplying by 512. The only thing checked was that it was not
+/// zero -- but any multiple of 2^55 multiplies out to exactly zero, and
+/// the byte size is then used as a divisor.
+///
+/// Division by zero panics whatever the profile: unlike an overflow it
+/// does not depend on `overflow-checks`, which this crate has off in
+/// release. So this is a panic in the shipped library, out of a plain
+/// `read_at`, from a header field.
+#[test]
+fn a_grain_size_that_multiplies_out_to_zero_is_refused_at_open() {
+    let path = tmp_path("grain_size_wraps");
+    build_valid(&path);
+    patch(&path, OFF_GRAIN_SIZE, &(1u64 << 55).to_le_bytes());
+
+    let outcome = VmdkReader::open(&path);
+    assert!(
+        outcome.is_err(),
+        "a grain size of 2^55 sectors -- 2^64 bytes, which is zero -- was accepted"
+    );
+}
+
+/// A grain table is read whole into a buffer of `num_gtes_per_gt * 4`,
+/// and the field is a `u32` checked only for being non-zero, so it can
+/// ask for 16 GiB. The grain *directory* ten lines earlier is required
+/// to fit inside the file; the table is not.
+#[test]
+fn a_grain_table_claiming_more_than_the_file_is_refused_by_name() {
+    let path = tmp_path("gt_past_file");
+    build_valid(&path);
+    patch(&path, OFF_NUM_GTES_PER_GT, &0x4000_0000u32.to_le_bytes());
+
+    // The open may well succeed -- the grain directory is unchanged --
+    // so the refusal has to come when the table is loaded.
+    let why = match VmdkReader::open(&path) {
+        Err(e) => format!("{e:?}"),
+        Ok(r) => {
+            let mut buf = [0u8; 512];
+            format!("{:?}", r.read_at(0, &mut buf).err())
+        }
+    };
+    assert!(
+        why.contains("grain table"),
+        "a grain table of 4 GiB in a 68 KiB file was refused as {why}, which \
+         means the buffer was allocated and read first"
+    );
+}

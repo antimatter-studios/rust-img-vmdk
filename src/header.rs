@@ -128,6 +128,22 @@ impl SparseHeader {
         if grain_size == 0 {
             return Err(Error::Corrupt("grain_size is zero"));
         }
+        // A GRAIN IN BYTES, NOT IN SECTORS.
+        //
+        // `grain_size` is a sector count and every use of it multiplies
+        // by 512. Checking it against zero says nothing about the
+        // product: any multiple of 2^55 multiplies out to exactly 2^64,
+        // which is zero, and the byte size is then used as a divisor.
+        //
+        // Division by zero panics whatever the profile -- unlike an
+        // overflow it does not depend on `overflow-checks`, which is off
+        // in release here. So an unchecked product here is a panic in
+        // the shipped library, out of a plain `read_at`.
+        if grain_size.checked_mul(512).is_none_or(|bytes| bytes == 0) {
+            return Err(Error::Corrupt(
+                "grain_size in sectors does not fit in a byte count",
+            ));
+        }
         if num_gtes_per_gt == 0 {
             return Err(Error::Corrupt("num_gtes_per_gt is zero"));
         }
