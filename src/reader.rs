@@ -358,8 +358,23 @@ impl VmdkReader {
         let entries_per_gt = self.header.num_gtes_per_gt as usize;
         let mut cache = self.gt_cache.lock().unwrap();
         if cache.loaded_idx != Some(gt_idx) {
-            let mut bytes = vec![0u8; entries_per_gt * GD_GT_ENTRY_SIZE as usize];
+            // The grain directory is required to fit inside the file
+            // where it is read, twenty lines from here. A grain table
+            // is the same kind of thing -- a run of 4-byte entries at a
+            // sector the header names -- and `num_gtes_per_gt` is a u32
+            // checked only for being non-zero, so it can ask for 16 GiB
+            // from a file of a few kilobytes, once per cache miss.
             let off = (gt_sector as u64) * SECTOR_SIZE;
+            let len = (entries_per_gt as u64)
+                .checked_mul(GD_GT_ENTRY_SIZE)
+                .ok_or(Error::Corrupt("grain table size overflows"))?;
+            let end = off
+                .checked_add(len)
+                .ok_or(Error::Corrupt("grain table extends past EOF"))?;
+            if end > self.file_extent() {
+                return Err(Error::Corrupt("grain table extends past EOF"));
+            }
+            let mut bytes = vec![0u8; len as usize];
             self.dev_read(off, &mut bytes)?;
             let mut entries = Vec::with_capacity(entries_per_gt);
             for chunk in bytes.chunks_exact(4) {
@@ -471,6 +486,20 @@ impl VmdkReader {
     /// Allocate `n_sectors` worth of host space at the device tail and
     /// return the starting sector. The cursor is bumped under lock so
     /// concurrent allocations don't collide.
+    /// How far the file reaches now.
+    ///
+    /// `FileDevice::size_bytes` is the length read when the file was
+    /// opened and never changes again, so on a writable image it stops
+    /// being the file's length the first time a grain or a grain table
+    /// is allocated at the tail. The allocation cursor is where the
+    /// writer has reached, so the later of the two is the real extent.
+    fn file_extent(&self) -> u64 {
+        let cursor = *self.alloc_cursor.lock().unwrap();
+        self.dev
+            .size_bytes()
+            .max(cursor.saturating_mul(SECTOR_SIZE))
+    }
+
     fn allocate_sectors(&self, n_sectors: u64) -> Result<u64> {
         let mut cur = self.alloc_cursor.lock().unwrap();
         let start = *cur;
