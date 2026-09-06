@@ -87,8 +87,11 @@ unsafe fn open_on_device(inner: *mut FsCoreDevice, writable: bool) -> *mut FsCor
     }));
     match res {
         Ok(p) => p,
-        Err(_) => {
-            set_last_error("panic in vmdk_open_on_device");
+        Err(panic) => {
+            set_last_error(format!(
+                "panic in vmdk_open_on_device: {}",
+                fs_core::ffi::panic_message(&panic)
+            ));
             ptr::null_mut()
         }
     }
@@ -123,8 +126,11 @@ fn open_path(path: *const c_char, writable: bool) -> *mut FsCoreDevice {
     }));
     match res {
         Ok(p) => p,
-        Err(_) => {
-            set_last_error("panic in vmdk_open");
+        Err(panic) => {
+            set_last_error(format!(
+                "panic in vmdk_open: {}",
+                fs_core::ffi::panic_message(&panic)
+            ));
             ptr::null_mut()
         }
     }

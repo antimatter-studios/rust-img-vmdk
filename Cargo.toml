@@ -19,7 +19,7 @@ crate-type = ["staticlib", "rlib"]
 qemu-validation = []
 
 [dependencies]
-am-fs-core = { path = "../rust-fs-core", version = "0.2" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2.6" }
 
 [dev-dependencies]
 # JSON parsing for `qemu-img info --output=json` in the qemu-validation
