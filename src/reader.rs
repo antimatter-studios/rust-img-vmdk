@@ -268,6 +268,31 @@ impl VmdkReader {
             .map_err(fs_core_to_vmdk_error)?;
         let desc_text =
             std::str::from_utf8(&desc_bytes).map_err(|_| Error::Corrupt("descriptor not UTF-8"))?;
+        // AN EMPTY DESCRIPTOR REGION IS A POSITIVE SIGNAL, NOT A PARSE
+        // FAILURE.
+        //
+        // A split disk's extents each carry a sparse header with a
+        // descriptor region reserved and left empty — qemu and VMware
+        // both write them that way, because the descriptor for a split
+        // disk lives in the sidecar `.vmdk`, not in the extent. Handing
+        // those NULs to the descriptor parser produced "descriptor
+        // missing createType", a `Corrupt`, about a healthy and complete
+        // file.
+        //
+        // The two verdicts mean opposite things to a caller. `Corrupt`
+        // says the file is damaged, which invites a warning, a repair, or
+        // a refusal to trust the disk; `Unsupported` says to use a
+        // different reader or convert it. Only a descriptor region with
+        // *content* that fails to parse deserves the first.
+        if desc_text
+            .trim_matches(|c: char| c == '\0' || c.is_whitespace())
+            .is_empty()
+        {
+            return Err(Error::Unsupported(
+                "one extent of a multi-extent VMDK — its descriptor region is empty by \
+                 design, and the descriptor lives in the sidecar .vmdk beside it",
+            ));
+        }
         let _descriptor = Descriptor::parse(desc_text)?;
 
         // Primary grain directory.

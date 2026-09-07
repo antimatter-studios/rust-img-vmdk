@@ -356,6 +356,42 @@ fn the_revisions_qemu_writes_are_the_revisions_we_accept() {
     }
 }
 
+/// The other half of the split-image story. The sidecar descriptor has
+/// no `KDMV` magic and fails in the header; the *extent* beside it has
+/// magic, gets past the header, and fails in the descriptor region —
+/// which qemu and VMware both reserve and leave empty, because the
+/// descriptor for a split disk lives in the sidecar.
+///
+/// The file is not corrupt. It is a healthy, complete extent, byte for
+/// byte as qemu wrote it, and `Corrupt` and `Unsupported` mean opposite
+/// things to a caller: one says "this file is damaged", inviting a
+/// warning, a repair, or a refusal to trust the disk, and the other says
+/// "use a different reader or convert it". A probe that walks a
+/// directory, or a user picking the file that looks like it holds the
+/// data, reaches an extent rather than the sidecar — the extents are the
+/// large files.
+#[test]
+fn a_split_sparse_extent_is_unsupported_rather_than_corrupt() {
+    let dir = TempDir::new("split-extent");
+    let sidecar = qemu_create_subformat(&dir, "twoGbMaxExtentSparse", "8M");
+    assert_eq!(qemu_virtual_size(&sidecar), 8 * 1024 * 1024);
+
+    let extent = dir.join("twoGbMaxExtentSparse-s001.vmdk");
+    assert!(
+        extent.exists(),
+        "fixture precondition: qemu wrote the extent"
+    );
+
+    match VmdkReader::open(&extent) {
+        Err(vmdk::Error::Unsupported(msg)) => assert!(
+            msg.contains("extent"),
+            "the refusal must say this is one extent of a split image, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other}"),
+        Ok(_) => panic!("opened one extent of a split image as if it were the whole disk"),
+    }
+}
+
 /// A file that is neither a sparse extent nor a descriptor is still not
 /// a VMDK. Widening the door for descriptor files must not turn the
 /// probe into one that accepts anything.
