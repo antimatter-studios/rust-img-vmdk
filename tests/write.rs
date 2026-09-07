@@ -493,6 +493,129 @@ fn read_sector(path: &std::path::Path, sector: u64) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// 7. concurrent writers
+// ---------------------------------------------------------------------------
+
+/// `VmdkReader` takes `&self` for writes, is `Send + Sync`, and the C
+/// ABI hands it out behind an `Arc` — so any thread holding the handle
+/// can write. Several threads writing into the *same* not-yet-allocated
+/// grain table must therefore all keep their data.
+///
+/// The failure this pins returns `Ok(())` to every writer and loses one
+/// of them: two threads both read a grain-directory entry of 0, both
+/// allocate a grain table, the second overwrites the first's directory
+/// slot, and the first then publishes its grain pointer into a table the
+/// directory no longer references. The bytes are on disk, in a grain
+/// nothing links, and the offset reads back as zeros.
+///
+/// Reopening from scratch is what makes the assertion honest: a stale
+/// in-memory grain-table cache can otherwise report the pointer that the
+/// file does not actually carry.
+#[test]
+fn concurrent_writers_into_one_unallocated_grain_table_all_survive() {
+    const WRITERS: u64 = 8;
+    const ROUNDS: usize = 4;
+
+    for round in 0..ROUNDS {
+        let path = tmp_path(&format!("concurrent_{round}"));
+        build_fully_sparse_two_gts(&path);
+
+        let r = Arc::new(VmdkReader::open_rw(&path).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS as usize));
+        let mut handles = Vec::new();
+        for w in 0..WRITERS {
+            let r = Arc::clone(&r);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                // Distinct grains, all inside grain table 0.
+                let offset = w * GRAIN_SIZE * SECTOR;
+                let payload = [0xA0u8 + w as u8; 512];
+                barrier.wait();
+                r.write_at(offset, &payload)
+                    .expect("a concurrent write must not error");
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        r.flush().unwrap();
+        drop(r);
+
+        // Reopen: only what the file itself links counts.
+        let r = VmdkReader::open(&path).unwrap();
+        for w in 0..WRITERS {
+            let mut got = [0u8; 512];
+            r.read_at(w * GRAIN_SIZE * SECTOR, &mut got).unwrap();
+            let want = 0xA0u8 + w as u8;
+            assert!(
+                got.iter().all(|&b| b == want),
+                "round {round}: writer {w}'s data was accepted and then lost \
+                 (wanted {want:#x} throughout, first byte back was {:#x})",
+                got[0]
+            );
+        }
+        drop(r);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// The same race one level down: several threads writing into distinct
+/// parts of the *same* grain, whose grain table already exists. Each
+/// sees an entry of 0, each allocates its own grain, and the last
+/// `update_gt_entry` wins — orphaning the others' payloads while
+/// returning `Ok(())` to all of them.
+#[test]
+fn concurrent_writers_into_one_sparse_grain_all_survive() {
+    const WRITERS: u64 = 8;
+    const ROUNDS: usize = 4;
+    const CHUNK: u64 = 512;
+
+    for round in 0..ROUNDS {
+        let path = tmp_path(&format!("concurrent_grain_{round}"));
+        let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+        // Grain 0 is allocated, so grain table 0 exists; grain 1 is
+        // sparse and is what every writer lands in.
+        build_grain0_only(&path, &pattern);
+
+        let r = Arc::new(VmdkReader::open_rw(&path).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS as usize));
+        let mut handles = Vec::new();
+        for w in 0..WRITERS {
+            let r = Arc::clone(&r);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let offset = GRAIN_SIZE * SECTOR + w * CHUNK;
+                let payload = vec![0xB0u8 + w as u8; CHUNK as usize];
+                barrier.wait();
+                r.write_at(offset, &payload)
+                    .expect("a concurrent write must not error");
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        r.flush().unwrap();
+        drop(r);
+
+        let r = VmdkReader::open(&path).unwrap();
+        for w in 0..WRITERS {
+            let mut got = vec![0u8; CHUNK as usize];
+            r.read_at(GRAIN_SIZE * SECTOR + w * CHUNK, &mut got)
+                .unwrap();
+            let want = 0xB0u8 + w as u8;
+            assert!(
+                got.iter().all(|&b| b == want),
+                "round {round}: writer {w}'s data was accepted and then lost \
+                 (wanted {want:#x} throughout, first byte back was {:#x})",
+                got[0]
+            );
+        }
+        drop(r);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Read-only sanity: open() rejects writes
 // ---------------------------------------------------------------------------
 

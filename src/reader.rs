@@ -77,6 +77,21 @@ pub struct VmdkReader {
     /// reported size at open time and bumped as grains/tables are
     /// allocated. Mutex-wrapped because allocation has to be serialised.
     alloc_cursor: Mutex<u64>,
+    /// Serialises the whole allocate-and-publish sequence.
+    ///
+    /// Every individual structure here has its own lock, and that was
+    /// not enough: allocating a grain means *testing* an entry, then
+    /// allocating, then *publishing* — and with each lock taken and
+    /// dropped in between, two writers could both read the same absent
+    /// entry, both allocate, and the second could overwrite the first's
+    /// published pointer. Both calls returned `Ok(())` and one writer's
+    /// bytes were left in a grain nothing referenced.
+    ///
+    /// Writing through to a grain that already exists does not take this
+    /// lock, so writers only serialise where they must: an entry that
+    /// names a sector never changes afterwards, because grains are never
+    /// relocated.
+    allocation: Mutex<()>,
     /// First byte a grain may legally occupy: everything below it is
     /// the image's own metadata. See [`VmdkReader::grain_host_offset`].
     first_grain_byte: u64,
@@ -102,12 +117,20 @@ enum GrainState {
 }
 
 struct GtCache {
-    /// Index into `gd` of the table currently held; `usize::MAX` if empty.
-    /// Which grain table is in `entries`, or `None` if nothing is.
+    /// Which grain table is in `entries`, or `None` if nothing is —
+    /// identified by its directory index *and* the sector it was loaded
+    /// from.
     ///
-    /// Was `usize::MAX` as a sentinel, which every read had to know
-    /// about and no type enforced.
-    loaded_idx: Option<usize>,
+    /// The index alone is not an identity. A grain table can be
+    /// allocated afresh for an index that already had one, and a cache
+    /// keyed only on the index will then hand back, or accept an update
+    /// into, the contents of a table the directory no longer points at.
+    /// Two values, both of which must match, make a stale slot a miss
+    /// rather than a wrong answer.
+    ///
+    /// (Was `usize::MAX` as a sentinel for "empty", which every read had
+    /// to know about and no type enforced.)
+    loaded: Option<(usize, u32)>,
     entries: Vec<u32>,
 }
 
@@ -290,12 +313,13 @@ impl VmdkReader {
             header,
             gd: Mutex::new(gd),
             gt_cache: Mutex::new(GtCache {
-                loaded_idx: None,
+                loaded: None,
                 entries: Vec::new(),
             }),
             virtual_size,
             writable,
             alloc_cursor: Mutex::new(alloc_cursor),
+            allocation: Mutex::new(()),
             first_grain_byte,
         })
     }
@@ -466,7 +490,7 @@ impl VmdkReader {
     fn lookup_grain(&self, gt_idx: usize, gte_idx: usize, gt_sector: u32) -> Result<u32> {
         let entries_per_gt = self.header.num_gtes_per_gt as usize;
         let mut cache = self.gt_cache.lock().unwrap();
-        if cache.loaded_idx != Some(gt_idx) {
+        if cache.loaded != Some((gt_idx, gt_sector)) {
             // The grain directory is required to fit inside the file
             // where it is read, twenty lines from here. A grain table
             // is the same kind of thing -- a run of 4-byte entries at a
@@ -490,7 +514,7 @@ impl VmdkReader {
                 entries.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
             }
             cache.entries = entries;
-            cache.loaded_idx = Some(gt_idx);
+            cache.loaded = Some((gt_idx, gt_sector));
         }
         if gte_idx >= cache.entries.len() {
             return Err(Error::Corrupt("gte_idx past grain table"));
@@ -530,66 +554,98 @@ impl VmdkReader {
             });
         }
 
-        let grain_bytes = self.grain_size_bytes();
         let mut cursor = offset;
         let mut written: usize = 0;
 
         while cursor < end {
-            let GrainAddress {
-                in_grain,
-                gt_idx,
-                gte_idx,
-                chunk_len,
-            } = self.grain_address(cursor, end);
-            let src = &buf[written..written + chunk_len];
+            let addr = self.grain_address(cursor, end);
+            let src = &buf[written..written + addr.chunk_len];
 
-            // Zero means the whole grain table is unallocated, so one
-            // has to exist before the grain inside it can.
-            let gt_sector = self.gd_entry(gt_idx)?;
-
-            let gt_sector = if gt_sector == 0 {
-                self.allocate_grain_table(gt_idx)?
-            } else {
-                gt_sector
-            };
-
-            // Now look up (or allocate) the grain inside this GT.
-            let entry = self.lookup_grain(gt_idx, gte_idx, gt_sector)?;
-            match self.grain_state(entry) {
-                // Sparse grain, or one the table marks as all-zero:
-                // allocate, zero-pad, write payload, then publish the GT
-                // entry. The zeroed-grain marker takes this branch
-                // because it is not a sector number — following it would
-                // write the payload over the embedded descriptor.
-                GrainState::Unallocated | GrainState::Zeroed => {
-                    let new_grain_sector = self.allocate_grain()?;
-                    if in_grain != 0 || (chunk_len as u64) < grain_bytes {
-                        // Partial-grain write: zero-init the whole grain
-                        // first so the unwritten head/tail reads as zero
-                        // (the spec's "absent → zero" semantics carry over
-                        // to a freshly allocated grain, and a zeroed grain
-                        // promised zeros there outright).
-                        let zeros = vec![0u8; grain_bytes as usize];
-                        self.dev_write((new_grain_sector as u64) * SECTOR_SIZE, &zeros)?;
-                    }
-                    self.dev_write((new_grain_sector as u64) * SECTOR_SIZE + in_grain, src)?;
-                    self.dev_flush()?;
-                    // Step 2: publish the GT entry.
-                    self.update_gt_entry(gt_idx, gte_idx, gt_sector, new_grain_sector)?;
-                }
-                // Allocated grain: write through.
-                GrainState::At(grain_sector) => {
-                    let host_off =
-                        self.grain_host_offset(grain_sector, in_grain, chunk_len as u64)?;
-                    self.dev_write(host_off, src)?;
-                    self.dev_flush()?;
-                }
+            // Fast path: a grain that already exists is written through
+            // without taking the allocation lock, so writers into
+            // populated regions do not serialise with each other. Safe
+            // to decide outside the lock because a grain-table entry
+            // that names a sector never changes again — a grain is never
+            // relocated once published.
+            match self.backing_sector(addr.gt_idx, addr.gte_idx)? {
+                Some(grain_sector) => self.write_through(grain_sector, &addr, src)?,
+                None => self.allocate_and_write(&addr, src)?,
             }
 
-            cursor += chunk_len as u64;
-            written += chunk_len;
+            cursor += addr.chunk_len as u64;
+            written += addr.chunk_len;
         }
         Ok(())
+    }
+
+    /// The host sector backing this grain, or `None` if the grain has no
+    /// data yet — because its table is unallocated, its entry is zero,
+    /// or its entry is the zeroed-grain marker.
+    fn backing_sector(&self, gt_idx: usize, gte_idx: usize) -> Result<Option<u32>> {
+        let gt_sector = self.gd_entry(gt_idx)?;
+        if gt_sector == 0 {
+            return Ok(None);
+        }
+        let entry = self.lookup_grain(gt_idx, gte_idx, gt_sector)?;
+        Ok(match self.grain_state(entry) {
+            GrainState::At(sector) => Some(sector),
+            GrainState::Unallocated | GrainState::Zeroed => None,
+        })
+    }
+
+    fn write_through(&self, grain_sector: u32, addr: &GrainAddress, src: &[u8]) -> Result<()> {
+        let host_off =
+            self.grain_host_offset(grain_sector, addr.in_grain, addr.chunk_len as u64)?;
+        self.dev_write(host_off, src)?;
+        self.dev_flush()
+    }
+
+    /// Give this grain a home and land `src` in it.
+    ///
+    /// Everything from here to the published grain-table entry runs
+    /// under [`VmdkReader::allocation`]. It has to: the sequence is
+    /// test-then-allocate-then-publish at two levels, and interleaving
+    /// two of them loses a writer's data while telling it the write
+    /// succeeded.
+    ///
+    /// The state is re-read under the lock rather than carried in from
+    /// the caller's earlier look, because another writer may have
+    /// allocated the table, the grain, or both in between — in which
+    /// case this becomes an ordinary write-through.
+    fn allocate_and_write(&self, addr: &GrainAddress, src: &[u8]) -> Result<()> {
+        let _serialised = self.allocation.lock().unwrap();
+
+        // Zero means the whole grain table is unallocated, so one has to
+        // exist before the grain inside it can.
+        let gt_sector = match self.gd_entry(addr.gt_idx)? {
+            0 => self.allocate_grain_table(addr.gt_idx)?,
+            s => s,
+        };
+
+        let entry = self.lookup_grain(addr.gt_idx, addr.gte_idx, gt_sector)?;
+        if let GrainState::At(grain_sector) = self.grain_state(entry) {
+            return self.write_through(grain_sector, addr, src);
+        }
+
+        // Sparse grain, or one the table marks as all-zero: allocate,
+        // zero-pad, write payload, then publish the grain-table entry.
+        // The zeroed-grain marker takes this branch because it is not a
+        // sector number — following it would write the payload over the
+        // embedded descriptor.
+        let grain_bytes = self.grain_size_bytes();
+        let new_grain_sector = self.allocate_grain()?;
+        if addr.in_grain != 0 || (addr.chunk_len as u64) < grain_bytes {
+            // Partial-grain write: zero-init the whole grain first so
+            // the unwritten head/tail reads as zero (the spec's "absent
+            // → zero" semantics carry over to a freshly allocated grain,
+            // and a zeroed grain promised zeros there outright).
+            let zeros = vec![0u8; grain_bytes as usize];
+            self.dev_write((new_grain_sector as u64) * SECTOR_SIZE, &zeros)?;
+        }
+        self.dev_write((new_grain_sector as u64) * SECTOR_SIZE + addr.in_grain, src)?;
+        self.dev_flush()?;
+        // Step 2: publish the GT entry.
+        self.update_gt_entry(addr.gt_idx, addr.gte_idx, gt_sector, new_grain_sector)
     }
 
     /// Flush writes to stable storage. No-op for read-only images.
@@ -687,8 +743,8 @@ impl VmdkReader {
         // (it can't have meaningful contents — the GT was just zeroed —
         // but being defensive avoids a stale-cache surprise).
         let mut cache = self.gt_cache.lock().unwrap();
-        if cache.loaded_idx == Some(gt_idx) {
-            cache.loaded_idx = None;
+        if cache.loaded.is_some_and(|(idx, _)| idx == gt_idx) {
+            cache.loaded = None;
             cache.entries.clear();
         }
 
@@ -710,7 +766,7 @@ impl VmdkReader {
         self.dev_flush()?;
 
         let mut cache = self.gt_cache.lock().unwrap();
-        if cache.loaded_idx == Some(gt_idx) && gte_idx < cache.entries.len() {
+        if cache.loaded == Some((gt_idx, gt_sector)) && gte_idx < cache.entries.len() {
             cache.entries[gte_idx] = new_grain_sector;
         }
         Ok(())
