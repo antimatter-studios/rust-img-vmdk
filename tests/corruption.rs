@@ -310,3 +310,40 @@ fn a_grain_table_claiming_more_than_the_file_is_refused_by_name() {
          means the buffer was allocated and read first"
     );
 }
+
+/// The read path bounds a grain table before it touches it. The write
+/// path creates one, so no lookup precedes it, and it sized both the
+/// allocation and its zero-fill buffer straight from `num_gtes_per_gt`.
+///
+/// Opening a small image read-write and writing one sector into an
+/// unallocated region therefore allocated whatever the header asked
+/// for: measured with `num_gtes_per_gt = 0x0100_0000`, a 512-byte write
+/// into a 68 KiB image produced a 64 MiB file and a 64 MiB zero buffer.
+/// The image causing it need not be malicious — a truncated download
+/// reaches the same place.
+#[test]
+fn a_one_sector_write_does_not_allocate_whatever_the_header_asks_for() {
+    let path = tmp_path("gt_alloc_bomb");
+    build_valid(&path);
+    // Empty the grain-directory slot so the write has to *create* a
+    // grain table rather than look one up.
+    patch(&path, GD_OFF_SECTOR * SECTOR, &0u32.to_le_bytes());
+    patch(&path, OFF_NUM_GTES_PER_GT, &0x0100_0000u32.to_le_bytes());
+
+    let before = std::fs::metadata(&path).unwrap().len();
+    let why = match VmdkReader::open_rw(&path) {
+        Err(e) => format!("{e:?}"),
+        Ok(r) => format!("{:?}", r.write_at(0, &[0xABu8; 512]).err()),
+    };
+    let after = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        why.contains("grain table"),
+        "a grain table of 64 MiB in a 68 KiB image was refused as {why}, which \
+         means it was allocated and zero-filled first"
+    );
+
+    assert_eq!(
+        before, after,
+        "the image grew from {before} to {after} bytes for a 512-byte write"
+    );
+}

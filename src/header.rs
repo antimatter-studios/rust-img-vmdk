@@ -29,6 +29,22 @@ use crate::error::{Error, Result};
 pub const HEADER_SIZE: usize = 512;
 pub const MAGIC: u32 = 0x564D_444B; // 'KDMV' little-endian on disk
 
+/// The largest grain table this reader will accept, in entries.
+///
+/// `numGTEsPerGT` is 512 in every image the reference producers write —
+/// 2 KiB of pointers. The field is a `u32` and the format puts no
+/// ceiling on it, so an image can ask for a 16 GiB table, and two
+/// separate paths size a buffer from it: the read path when it loads a
+/// table, the write path when it creates one. The read path can bound
+/// the load against the file the table lives in. The write path cannot,
+/// because the table does not exist yet — which is how a 512-byte write
+/// into a 68 KiB image came to allocate and zero-fill 64 MiB.
+///
+/// 262,144 entries is a 1 MiB table: 512 times what any producer writes,
+/// and small enough that neither path can be turned into an allocation
+/// weapon. A value above it is not describing a real image.
+pub const MAX_GTES_PER_GT: u32 = 1 << 18;
+
 /// `flags` bit 1 — **the image carries a redundant grain table**.
 ///
 /// A second copy of the grain directory, and of every grain table, kept
@@ -174,6 +190,11 @@ impl SparseHeader {
         if num_gtes_per_gt == 0 {
             return Err(Error::Corrupt("num_gtes_per_gt is zero"));
         }
+        if num_gtes_per_gt > MAX_GTES_PER_GT {
+            return Err(Error::Corrupt(
+                "grain table larger than any real image declares (num_gtes_per_gt out of range)",
+            ));
+        }
         if compress_algorithm != 0 {
             return Err(Error::Unsupported(
                 "compressed VMDK (compress_algorithm != 0)",
@@ -292,6 +313,28 @@ mod tests {
         h[20..28].copy_from_slice(&0u64.to_le_bytes());
         let err = SparseHeader::parse(&h).unwrap_err();
         assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    /// The field is a `u32` with no ceiling in the format, and both the
+    /// read path and the write path size a buffer from it. The write
+    /// path is the one with no file to bound against, since the table it
+    /// is creating does not exist yet.
+    #[test]
+    fn rejects_a_grain_table_larger_than_any_real_image() {
+        let mut h = valid_header();
+        h[44..48].copy_from_slice(&(MAX_GTES_PER_GT + 1).to_le_bytes());
+        match SparseHeader::parse(&h).unwrap_err() {
+            Error::Corrupt(msg) => assert!(msg.contains("grain table"), "got {msg:?}"),
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+
+        // The cap itself is accepted: it is a bound, not a preference.
+        let mut h = valid_header();
+        h[44..48].copy_from_slice(&MAX_GTES_PER_GT.to_le_bytes());
+        assert_eq!(
+            SparseHeader::parse(&h).unwrap().num_gtes_per_gt,
+            MAX_GTES_PER_GT
+        );
     }
 
     #[test]
