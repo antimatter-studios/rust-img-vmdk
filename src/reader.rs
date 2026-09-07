@@ -36,7 +36,7 @@
 
 use crate::descriptor::Descriptor;
 use crate::error::{Error, Result};
-use crate::header::{SparseHeader, HEADER_SIZE};
+use crate::header::{SparseHeader, GTE_ZEROED_GRAIN, HEADER_SIZE};
 use fs_core::{BlockDevice, FileDevice};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -77,6 +77,28 @@ pub struct VmdkReader {
     /// reported size at open time and bumped as grains/tables are
     /// allocated. Mutex-wrapped because allocation has to be serialised.
     alloc_cursor: Mutex<u64>,
+    /// First byte a grain may legally occupy: everything below it is
+    /// the image's own metadata. See [`VmdkReader::grain_host_offset`].
+    first_grain_byte: u64,
+}
+
+/// What a grain-table entry says about its grain.
+///
+/// The reader used to spell this out as `entry == 0` at one site and
+/// the writer as `entry == 0` at another, and neither knew that `0` is
+/// not the only entry that means "no data here". Naming the three
+/// states puts the format's vocabulary in one place, so a reader and a
+/// writer cannot disagree about what an entry means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrainState {
+    /// No grain: nothing is allocated for this range.
+    Unallocated,
+    /// A grain exists and is entirely zero — the zeroed-grain marker.
+    /// Reads as zeros; a write into it must allocate, exactly as
+    /// [`GrainState::Unallocated`] does.
+    Zeroed,
+    /// A grain at this host sector.
+    At(u32),
 }
 
 struct GtCache {
@@ -220,6 +242,49 @@ impl VmdkReader {
         // next sector. Newly allocated grains/tables land at the tail.
         let alloc_cursor = dev_size.div_ceil(SECTOR_SIZE);
 
+        // WHERE THE GRAINS BEGIN.
+        //
+        // A grain-table entry is an unsigned sector number with no
+        // reserved range, so a corrupt or hostile table can point a
+        // grain at the header, the descriptor or a directory and the
+        // read comes back as plausible bytes. The grain *table* pointer
+        // has been bounds-checked since `lookup_grain` was written; the
+        // grain pointer never was, and "one past EOF errors anyway" is
+        // what made the omission look like a check.
+        //
+        // Every region below is metadata the format puts in front of the
+        // grains, so their end is a floor no grain may sit under. Each
+        // is folded in only when its own extent fits the device: a
+        // nonsense `rgd_offset` should not make an otherwise readable
+        // image unreadable, and the redundant directory is not consulted
+        // on the read path at all.
+        let dev_sectors = dev_size / SECTOR_SIZE;
+        let gd_sectors = (gd_byte_len as u64).div_ceil(SECTOR_SIZE);
+        let fits = |start: u64, len: u64| -> Option<u64> {
+            let end = start.checked_add(len)?;
+            (end <= dev_sectors).then_some(end)
+        };
+        let mut first_grain_sector = 1; // sector 0 is the sparse header
+        for end in [
+            fits(header.descriptor_offset, header.descriptor_size),
+            fits(header.gd_offset, gd_sectors),
+            (header.rgd_offset != 0)
+                .then(|| fits(header.rgd_offset, gd_sectors))
+                .flatten(),
+            // `over_head` is the format's own statement of how many
+            // sectors of metadata precede the grains. It is the only one
+            // of these that also covers the grain *tables*, whose
+            // positions are otherwise only discoverable one directory
+            // entry at a time.
+            fits(header.over_head, 0),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            first_grain_sector = first_grain_sector.max(end);
+        }
+        let first_grain_byte = first_grain_sector * SECTOR_SIZE;
+
         Ok(Self {
             dev,
             header,
@@ -231,6 +296,7 @@ impl VmdkReader {
             virtual_size,
             writable,
             alloc_cursor: Mutex::new(alloc_cursor),
+            first_grain_byte,
         })
     }
 
@@ -302,12 +368,14 @@ impl VmdkReader {
                 // Whole grain table unallocated — region reads as zero.
                 dst.fill(0);
             } else {
-                let grain_sector = self.lookup_grain(gt_idx, gte_idx, gt_sector)?;
-                if grain_sector == 0 {
-                    dst.fill(0);
-                } else {
-                    let host_off = (grain_sector as u64) * SECTOR_SIZE + in_grain;
-                    self.dev_read(host_off, dst)?;
+                let entry = self.lookup_grain(gt_idx, gte_idx, gt_sector)?;
+                match self.grain_state(entry) {
+                    GrainState::Unallocated | GrainState::Zeroed => dst.fill(0),
+                    GrainState::At(grain_sector) => {
+                        let host_off =
+                            self.grain_host_offset(grain_sector, in_grain, chunk_len as u64)?;
+                        self.dev_read(host_off, dst)?;
+                    }
                 }
             }
 
@@ -338,6 +406,47 @@ impl VmdkReader {
             gte_idx: (grain_idx % entries_per_gt) as usize,
             chunk_len: std::cmp::min(grain_bytes - in_grain, end - cursor) as usize,
         }
+    }
+
+    /// What a raw grain-table entry means in *this* image.
+    ///
+    /// [`GTE_ZEROED_GRAIN`] is a sentinel only in an image whose header
+    /// says so. Elsewhere it is an ordinary sector number that happens
+    /// to address the embedded descriptor, and
+    /// [`Self::grain_host_offset`] refuses it on that basis rather than
+    /// this one — a reader should not have to guess which of the two an
+    /// unannounced `1` was meant to be.
+    fn grain_state(&self, entry: u32) -> GrainState {
+        match entry {
+            0 => GrainState::Unallocated,
+            GTE_ZEROED_GRAIN if self.header.uses_zeroed_grain_marker() => GrainState::Zeroed,
+            sector => GrainState::At(sector),
+        }
+    }
+
+    /// The host byte offset of `len` bytes at `in_grain` inside the
+    /// grain starting at `grain_sector`, refusing a pointer that lands
+    /// in the image's own metadata or past its end.
+    ///
+    /// Only the bytes actually being touched are required to be inside
+    /// the file: an image whose final grain is truncated is still
+    /// readable up to where it stops, which is how a sparse tail behaves
+    /// and is not a reason to refuse the whole image.
+    fn grain_host_offset(&self, grain_sector: u32, in_grain: u64, len: u64) -> Result<u64> {
+        let start = (grain_sector as u64) * SECTOR_SIZE;
+        if start < self.first_grain_byte {
+            return Err(Error::Corrupt(
+                "grain pointer lands inside the image's metadata",
+            ));
+        }
+        let off = start + in_grain;
+        let end = off
+            .checked_add(len)
+            .ok_or(Error::Corrupt("grain extent overflows"))?;
+        if end > self.file_extent() {
+            return Err(Error::Corrupt("grain extends past EOF"));
+        }
+        Ok(off)
     }
 
     /// The grain directory's entry for `gt_idx`, bounds-checked.
@@ -445,28 +554,36 @@ impl VmdkReader {
             };
 
             // Now look up (or allocate) the grain inside this GT.
-            let grain_sector = self.lookup_grain(gt_idx, gte_idx, gt_sector)?;
-            if grain_sector == 0 {
-                // Sparse grain: allocate, zero-pad, write payload, then
-                // publish the GT entry.
-                let new_grain_sector = self.allocate_grain()?;
-                if in_grain != 0 || (chunk_len as u64) < grain_bytes {
-                    // Partial-grain write: zero-init the whole grain
-                    // first so the unwritten head/tail reads as zero
-                    // (the spec's "absent → zero" semantics carry over
-                    // to a freshly allocated grain).
-                    let zeros = vec![0u8; grain_bytes as usize];
-                    self.dev_write((new_grain_sector as u64) * SECTOR_SIZE, &zeros)?;
+            let entry = self.lookup_grain(gt_idx, gte_idx, gt_sector)?;
+            match self.grain_state(entry) {
+                // Sparse grain, or one the table marks as all-zero:
+                // allocate, zero-pad, write payload, then publish the GT
+                // entry. The zeroed-grain marker takes this branch
+                // because it is not a sector number — following it would
+                // write the payload over the embedded descriptor.
+                GrainState::Unallocated | GrainState::Zeroed => {
+                    let new_grain_sector = self.allocate_grain()?;
+                    if in_grain != 0 || (chunk_len as u64) < grain_bytes {
+                        // Partial-grain write: zero-init the whole grain
+                        // first so the unwritten head/tail reads as zero
+                        // (the spec's "absent → zero" semantics carry over
+                        // to a freshly allocated grain, and a zeroed grain
+                        // promised zeros there outright).
+                        let zeros = vec![0u8; grain_bytes as usize];
+                        self.dev_write((new_grain_sector as u64) * SECTOR_SIZE, &zeros)?;
+                    }
+                    self.dev_write((new_grain_sector as u64) * SECTOR_SIZE + in_grain, src)?;
+                    self.dev_flush()?;
+                    // Step 2: publish the GT entry.
+                    self.update_gt_entry(gt_idx, gte_idx, gt_sector, new_grain_sector)?;
                 }
-                self.dev_write((new_grain_sector as u64) * SECTOR_SIZE + in_grain, src)?;
-                self.dev_flush()?;
-                // Step 2: publish the GT entry.
-                self.update_gt_entry(gt_idx, gte_idx, gt_sector, new_grain_sector)?;
-            } else {
                 // Allocated grain: write through.
-                let host_off = (grain_sector as u64) * SECTOR_SIZE + in_grain;
-                self.dev_write(host_off, src)?;
-                self.dev_flush()?;
+                GrainState::At(grain_sector) => {
+                    let host_off =
+                        self.grain_host_offset(grain_sector, in_grain, chunk_len as u64)?;
+                    self.dev_write(host_off, src)?;
+                    self.dev_flush()?;
+                }
             }
 
             cursor += chunk_len as u64;

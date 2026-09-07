@@ -29,6 +29,24 @@ use crate::error::{Error, Result};
 pub const HEADER_SIZE: usize = 512;
 pub const MAGIC: u32 = 0x564D_444B; // 'KDMV' little-endian on disk
 
+/// `flags` bit 2 — **the image uses the zeroed-grain marker**.
+///
+/// When set, the grain-table entry [`GTE_ZEROED_GRAIN`] is a sentinel
+/// rather than a sector number. Producers announce the convention here
+/// because the sentinel is otherwise indistinguishable from a pointer,
+/// and a reader that does not know about it will follow it.
+pub const FLAG_ZEROED_GRAIN: u32 = 0x4;
+
+/// The grain-table entry that means "this grain exists and is entirely
+/// zero", valid only when [`FLAG_ZEROED_GRAIN`] is set in `flags`.
+///
+/// It is `1` — an ordinary-looking sector number, and specifically the
+/// sector where a monolithic sparse VMDK keeps its embedded descriptor.
+/// A reader that treats it as a pointer returns the descriptor's ASCII
+/// as guest data; a writer that treats it as a pointer overwrites the
+/// descriptor and the file stops being a VMDK.
+pub const GTE_ZEROED_GRAIN: u32 = 1;
+
 #[derive(Debug, Clone)]
 pub struct SparseHeader {
     pub version: u32,
@@ -153,6 +171,10 @@ impl SparseHeader {
             ));
         }
 
+        // `flags` used to be parsed and never read, which is how the
+        // zeroed-grain convention went unimplemented: the bit that
+        // announces it was sitting in the struct the whole time.
+
         Ok(SparseHeader {
             version,
             flags,
@@ -167,6 +189,18 @@ impl SparseHeader {
             unclean_shutdown,
             compress_algorithm,
         })
+    }
+
+    /// Whether this image uses the zeroed-grain marker — bit 2 of
+    /// `flags`, [`FLAG_ZEROED_GRAIN`].
+    ///
+    /// In such an image a grain-table entry of [`GTE_ZEROED_GRAIN`]
+    /// means "present, and entirely zero" rather than "at host sector
+    /// 1". qemu sets the bit whenever an image is created with
+    /// `zeroed_grain=on`, and writes the marker for every explicit zero
+    /// write or discard the guest makes.
+    pub fn uses_zeroed_grain_marker(&self) -> bool {
+        self.flags & FLAG_ZEROED_GRAIN != 0
     }
 }
 
@@ -268,6 +302,27 @@ mod tests {
             Error::Unsupported(_) => {}
             other => panic!("expected Unsupported, got {other:?}"),
         }
+    }
+
+    /// The `flags` word is what tells a reader that entry `1` is a
+    /// sentinel and not a sector number, so the bit has to survive the
+    /// parse and be legible afterwards. It used to do the first and not
+    /// the second: `flags` was stored and no code ever read it.
+    #[test]
+    fn reports_whether_the_image_uses_the_zeroed_grain_marker() {
+        let mut h = valid_header();
+        assert!(!SparseHeader::parse(&h).unwrap().uses_zeroed_grain_marker());
+
+        // 0x7 is what qemu writes for `zeroed_grain=on`: valid
+        // newline-detection bit, redundant-GD bit, zeroed-grain bit.
+        h[offsets::FLAGS..offsets::FLAGS + 4].copy_from_slice(&0x7u32.to_le_bytes());
+        let p = SparseHeader::parse(&h).unwrap();
+        assert_eq!(p.flags, 0x7);
+        assert!(p.uses_zeroed_grain_marker());
+
+        // Neighbouring bits must not be mistaken for it.
+        h[offsets::FLAGS..offsets::FLAGS + 4].copy_from_slice(&0x3u32.to_le_bytes());
+        assert!(!SparseHeader::parse(&h).unwrap().uses_zeroed_grain_marker());
     }
 
     #[test]

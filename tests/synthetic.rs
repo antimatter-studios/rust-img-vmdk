@@ -19,11 +19,11 @@
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 
-use vmdk::header::{HEADER_SIZE, MAGIC};
+use vmdk::header::{offsets, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC};
 use vmdk::VmdkReader;
 
 mod common;
-use common::TempPath;
+use common::{patch, TempPath};
 
 /// Self-deleting, so a panicking assertion leaves nothing behind.
 fn tmp_path(name: &str) -> TempPath {
@@ -189,6 +189,64 @@ fn unallocated_grain_reads_zero() {
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// Byte offset of grain-table entry `gte`.
+fn gte_offset(gte: usize) -> u64 {
+    GT_OFF_SECTOR * SECTOR + (gte as u64) * 4
+}
+
+/// A grain-table entry of `1` is the format's **zeroed-grain marker** —
+/// "this grain is present and entirely zero" — announced by bit 2 of the
+/// header's `flags` word. It is a sentinel, not a sector number.
+///
+/// Read as a sector number it addresses host sector 1, which in a
+/// monolithic sparse VMDK is where the embedded descriptor lives. So the
+/// failure this pins is not a wrong error: it is the descriptor's own
+/// ASCII returned as if it were guest data, with no error at all.
+#[test]
+fn zeroed_grain_marker_reads_as_zero_not_as_the_descriptor() {
+    let path = tmp_path("zg_read");
+    let pattern = vec![0xFFu8; (GRAIN_SIZE * SECTOR) as usize];
+    build_vmdk(&path, true, &pattern);
+    patch(
+        &path,
+        offsets::FLAGS as u64,
+        &FLAG_ZEROED_GRAIN.to_le_bytes(),
+    );
+    patch(&path, gte_offset(1), &GTE_ZEROED_GRAIN.to_le_bytes());
+
+    let r = VmdkReader::open(&path).unwrap();
+    let mut buf = vec![0xAAu8; 4096];
+    r.read_at(GRAIN_SIZE * SECTOR, &mut buf).unwrap();
+    assert!(
+        buf.iter().all(|&b| b == 0),
+        "a zeroed-grain marker must read as zeros; got {:?}",
+        String::from_utf8_lossy(&buf[..64])
+    );
+}
+
+/// The same sentinel value with the flag *clear* is not a sentinel: it
+/// is a grain pointer at host sector 1, which lands inside the embedded
+/// descriptor. There is no reading of that which produces guest data, so
+/// the answer is an error rather than the bytes that happen to be there.
+#[test]
+fn a_grain_pointer_into_the_descriptor_is_refused() {
+    let path = tmp_path("grain_in_desc");
+    let pattern = vec![0xFFu8; (GRAIN_SIZE * SECTOR) as usize];
+    build_vmdk(&path, true, &pattern);
+    // flags left at 0 — no zeroed-grain marker in this image.
+    patch(&path, gte_offset(1), &1u32.to_le_bytes());
+
+    let r = VmdkReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 512];
+    let err = r
+        .read_at(GRAIN_SIZE * SECTOR, &mut buf)
+        .expect_err("a grain inside the descriptor must not read as data");
+    assert!(
+        format!("{err}").contains("metadata"),
+        "expected a refusal naming the metadata region, got {err}"
+    );
 }
 
 #[test]
