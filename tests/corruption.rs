@@ -473,3 +473,160 @@ fn a_descriptor_region_with_unparseable_content_is_still_corrupt() {
         Ok(_) => panic!("opened an image whose descriptor says nothing"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// The descriptor against the header
+// ---------------------------------------------------------------------------
+
+/// Replace the descriptor sector with `text`, NUL-padded.
+fn patch_descriptor(path: &std::path::Path, text: &str) {
+    let mut s = [0u8; SECTOR as usize];
+    s[..text.len()].copy_from_slice(text.as_bytes());
+    patch(path, DESC_OFF_SECTOR * SECTOR, &s);
+}
+
+/// A descriptor listing more than one extent is refused.
+///
+/// The rest of such a disk lives in sibling files this reader does not
+/// open. Nothing refused it before, so the image was read as though
+/// extent 0 were the whole disk: every offset past the first extent
+/// resolves through a grain directory that does not describe it, and
+/// the result is zeros or wrong bytes with no error either way.
+#[test]
+fn a_descriptor_naming_more_than_one_extent_is_refused() {
+    let path = tmp_path("two_extents");
+    build_valid(&path);
+    patch_descriptor(
+        &path,
+        "createType=\"monolithicSparse\"\n\
+         RW 2048 SPARSE \"corrupt-s001.vmdk\"\n\
+         RW 2048 SPARSE \"corrupt-s002.vmdk\"\n",
+    );
+    match VmdkReader::open(&path) {
+        Err(Error::Unsupported(m)) => assert!(
+            m.contains("more than one extent"),
+            "refused, but not for the extent list: {m}"
+        ),
+        Ok(_) => panic!("a two-extent descriptor opened"),
+        Err(e) => panic!("a two-extent descriptor gave {e:?}"),
+    }
+}
+
+/// A descriptor with no extent line at all describes no data.
+#[test]
+fn a_descriptor_naming_no_extent_is_refused() {
+    let path = tmp_path("no_extent");
+    build_valid(&path);
+    patch_descriptor(&path, "createType=\"monolithicSparse\"\n");
+    match VmdkReader::open(&path) {
+        Err(Error::Corrupt(m)) => assert!(
+            m.contains("no extent"),
+            "refused, but not for the missing extent: {m}"
+        ),
+        Ok(_) => panic!("a descriptor with no extent opened"),
+        Err(e) => panic!("a descriptor with no extent gave {e:?}"),
+    }
+}
+
+/// The extent has to be the kind of extent a sparse header describes.
+///
+/// A `FLAT` extent is a raw span at an offset, not a grain directory.
+/// The header says one thing and the extent line says another, and the
+/// grain walk would read the flat data as though it were grains.
+#[test]
+fn a_descriptor_whose_extent_is_not_sparse_is_refused() {
+    let path = tmp_path("flat_extent");
+    build_valid(&path);
+    patch_descriptor(
+        &path,
+        "createType=\"monolithicSparse\"\nRW 2048 FLAT \"corrupt.vmdk\" 0\n",
+    );
+    match VmdkReader::open(&path) {
+        Err(Error::Unsupported(m)) => assert!(
+            m.contains("not SPARSE"),
+            "refused, but not for the extent kind: {m}"
+        ),
+        Ok(_) => panic!("a FLAT extent opened"),
+        Err(e) => panic!("a FLAT extent gave {e:?}"),
+    }
+}
+
+/// The two statements of the disk's size have to agree, and it is an
+/// inequality in either direction that says so.
+///
+/// `header.capacity` and the extent line's sector count describe the
+/// same length by independent routes, so a disagreement is the file
+/// contradicting itself — what a truncated or half-converted image
+/// looks like.
+///
+/// Three cases rather than one, because a disagreement has a direction
+/// and a comparison can be written to see only one of them. An extent
+/// longer than the capacity and an extent shorter than it are both
+/// refused here; a check written as `>` passes the short case, and a
+/// check written as `<` passes the long one. The third patches the
+/// header rather than the descriptor, so the test does not depend on
+/// which side of the comparison was disturbed.
+#[test]
+fn a_descriptor_and_header_that_disagree_about_the_size_are_refused() {
+    // Descriptor side, too long: the extent claims twice the capacity.
+    let path = tmp_path("extent_too_long");
+    build_valid(&path);
+    patch_descriptor(
+        &path,
+        "createType=\"monolithicSparse\"\nRW 4096 SPARSE \"corrupt.vmdk\"\n",
+    );
+    match VmdkReader::open(&path) {
+        Err(Error::Corrupt(m)) => assert!(
+            m.contains("disagree about"),
+            "refused, but not for the size: {m}"
+        ),
+        Ok(_) => panic!("an extent twice the capacity opened"),
+        Err(e) => panic!("an extent twice the capacity gave {e:?}"),
+    }
+
+    // Descriptor side, too short: the extent claims half of it. An
+    // extent shorter than the disk is the truncated-conversion shape,
+    // and it is the case a one-sided comparison lets through.
+    let path = tmp_path("extent_too_short");
+    build_valid(&path);
+    patch_descriptor(
+        &path,
+        "createType=\"monolithicSparse\"\nRW 1024 SPARSE \"corrupt.vmdk\"\n",
+    );
+    match VmdkReader::open(&path) {
+        Err(Error::Corrupt(m)) => assert!(
+            m.contains("disagree about"),
+            "refused, but not for the size: {m}"
+        ),
+        Ok(_) => panic!("an extent half the capacity opened"),
+        Err(e) => panic!("an extent half the capacity gave {e:?}"),
+    }
+
+    // Header side: capacity halved, descriptor left alone.
+    let path = tmp_path("capacity_halved");
+    build_valid(&path);
+    patch(&path, 12, &(CAPACITY_SECTORS / 2).to_le_bytes());
+    match VmdkReader::open(&path) {
+        Err(Error::Corrupt(m)) => assert!(
+            m.contains("disagree about"),
+            "refused, but not for the size: {m}"
+        ),
+        Ok(_) => panic!("a halved capacity opened"),
+        Err(e) => panic!("a halved capacity gave {e:?}"),
+    }
+}
+
+/// The descriptor is kept, so a caller can ask what the image says it
+/// is without re-reading and re-parsing the region.
+#[test]
+fn the_descriptor_is_held_on_the_reader() {
+    let path = tmp_path("descriptor_held");
+    build_valid(&path);
+    let r = VmdkReader::open(&path).unwrap();
+    let d = r.descriptor();
+    assert_eq!(d.create_type, "monolithicSparse");
+    assert_eq!(d.extents.len(), 1);
+    assert_eq!(d.extents[0].sectors, CAPACITY_SECTORS);
+    assert_eq!(d.extents[0].kind, "SPARSE");
+    assert_eq!(d.extents[0].filename, "corrupt.vmdk");
+}

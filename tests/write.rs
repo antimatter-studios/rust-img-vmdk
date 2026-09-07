@@ -72,14 +72,25 @@ fn build_header() -> [u8; HEADER_SIZE] {
     h
 }
 
-fn build_descriptor_sector() -> [u8; SECTOR as usize] {
-    let text = "# Disk DescriptorFile\n\
-                version=1\n\
-                CID=fffffffe\n\
-                parentCID=ffffffff\n\
-                createType=\"monolithicSparse\"\n\
-                \n\
-                RW 2048 SPARSE \"synthetic.vmdk\"\n";
+/// The descriptor names the extent's length, so it takes the capacity
+/// the header beside it declares.
+///
+/// It used to be a constant "RW 2048" used by every fixture, including
+/// the 64 MiB one, whose header says 131072. The reader dropped the
+/// parsed descriptor on the floor, so nothing noticed that two of these
+/// images contradicted themselves about how big they were — which is
+/// the defect these fixtures now help test rather than an incidental
+/// tidy-up.
+fn build_descriptor_sector(capacity_sectors: u64) -> [u8; SECTOR as usize] {
+    let text = format!(
+        "# Disk DescriptorFile\n\
+         version=1\n\
+         CID=fffffffe\n\
+         parentCID=ffffffff\n\
+         createType=\"monolithicSparse\"\n\
+         \n\
+         RW {capacity_sectors} SPARSE \"synthetic.vmdk\"\n"
+    );
     let mut s = [0u8; SECTOR as usize];
     s[..text.len()].copy_from_slice(text.as_bytes());
     s
@@ -91,7 +102,7 @@ fn build_descriptor_sector() -> [u8; SECTOR as usize] {
 /// are no other GT slots to consider in this fixture (gt_count == 1).
 fn build_grain0_only(path: &std::path::Path, grain0_pattern: &[u8]) {
     let header = build_header();
-    let descriptor = build_descriptor_sector();
+    let descriptor = build_descriptor_sector(CAPACITY_SECTORS);
 
     let mut gd_sector = [0u8; SECTOR as usize];
     gd_sector[0..4].copy_from_slice(&(GT_OFF_SECTOR as u32).to_le_bytes());
@@ -142,7 +153,7 @@ fn build_fully_sparse_two_gts(path: &std::path::Path) {
     h[75] = b'\r';
     h[76] = b'\n';
 
-    let descriptor = build_descriptor_sector();
+    let descriptor = build_descriptor_sector(CAP);
 
     // GD with 2 entries, both zero. Pad to one sector.
     let gd_sector = [0u8; SECTOR as usize];
@@ -189,8 +200,11 @@ fn build_with_redundant_directory(path: &std::path::Path) {
     let mut f = File::create(path).unwrap();
     f.set_len(RGD_GRAIN0_OFF_SECTOR * SECTOR).unwrap();
     f.write_all_at(&h, 0).unwrap();
-    f.write_all_at(&build_descriptor_sector(), DESC_OFF_SECTOR * SECTOR)
-        .unwrap();
+    f.write_all_at(
+        &build_descriptor_sector(CAPACITY_SECTORS),
+        DESC_OFF_SECTOR * SECTOR,
+    )
+    .unwrap();
     f.write_all_at(&rgd_sector, RGD_OFF_SECTOR * SECTOR)
         .unwrap();
     f.write_all_at(&gt_bytes, RGT_OFF_SECTOR * SECTOR).unwrap();

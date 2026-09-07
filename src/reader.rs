@@ -100,6 +100,15 @@ pub struct VmdkReader {
     /// the reader may live behind an `Arc` itself (FFI handles).
     dev: Arc<dyn BlockDevice>,
     header: SparseHeader,
+    /// The descriptor this image carries, as parsed at open.
+    ///
+    /// Held rather than dropped. It is the only place the create type,
+    /// the extent list and the parent CID are written down, and the
+    /// checks in [`descriptor_agrees_with_header`] are checks *of* it;
+    /// dropping it left the parse as nothing but a way of failing on a
+    /// malformed descriptor, and left a caller wanting any of those
+    /// three fields to re-read and re-parse the region itself.
+    descriptor: Descriptor,
     /// Cached primary grain directory (one u32 per grain table). Always
     /// small — `ceil(capacity / (grain_size * num_gtes_per_gt))` entries.
     /// Mutex-wrapped because the writer mutates entries in place when
@@ -334,7 +343,8 @@ impl VmdkReader {
                  design, and the descriptor lives in the sidecar .vmdk beside it",
             ));
         }
-        let _descriptor = Descriptor::parse(desc_text)?;
+        let descriptor = Descriptor::parse(desc_text)?;
+        descriptor_agrees_with_header(&descriptor, &header)?;
 
         // Primary grain directory.
         if header.gd_offset == 0 {
@@ -455,6 +465,7 @@ impl VmdkReader {
         Ok(Self {
             dev,
             header,
+            descriptor,
             gd: Mutex::new(gd),
             rgd: redundant_gd,
             gt_cache: Mutex::new(GtCache {
@@ -474,6 +485,14 @@ impl VmdkReader {
 
     pub fn virtual_size(&self) -> u64 {
         self.virtual_size
+    }
+
+    /// The descriptor this image carries.
+    ///
+    /// Its create type, extent list and parent CID are the image's own
+    /// account of what it is, which is worth having beside the header's.
+    pub fn descriptor(&self) -> &Descriptor {
+        &self.descriptor
     }
 
     pub fn grain_size_bytes(&self) -> u64 {
@@ -1096,6 +1115,69 @@ fn looks_like_a_sparse_extent(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Resu
 
 /// The refusal for an ESXi `vmfsSparse` extent.
 ///
+/// The descriptor and the header describe the same disk, or the image
+/// is refused.
+///
+/// Both are in the file and both say how big the disk is, by
+/// independent routes: `header.capacity` in sectors, and the extent
+/// line's sector count. Comparing them is free on every open and is
+/// exactly what a truncated or half-converted file gets wrong. It is
+/// also what makes "this reader handles monolithicSparse" true rather
+/// than aspirational — the extent list is the part of the descriptor
+/// that says whether the whole disk is in this file.
+///
+/// A descriptor with several extents is a split image whose remaining
+/// extents live in sibling files this reader does not open. Nothing
+/// refused it before, so such a file was read as though extent 0 were
+/// the whole disk: every offset past the first extent resolves through
+/// a grain directory that does not describe it, and the result is
+/// zeros or wrong bytes with no error either way.
+///
+/// Measured against the reference tool, whose `monolithicSparse`
+/// images carry exactly one `SPARSE` extent whose sector count equals
+/// `capacity` — including for capacities that are not a whole number
+/// of grains, where a rounded extent length would have been the
+/// plausible alternative:
+///
+/// ```text
+/// 1M       cap=2048    RW 2048 SPARSE
+/// 1234567  cap=2412    RW 2412 SPARSE
+/// 3000000  cap=5860    RW 5860 SPARSE
+/// 64M      cap=131072  RW 131072 SPARSE
+/// ```
+fn descriptor_agrees_with_header(desc: &Descriptor, header: &SparseHeader) -> Result<()> {
+    let extent = match desc.extents.as_slice() {
+        [one] => one,
+        // A descriptor with no extent line at all describes no data.
+        // `Corrupt` rather than `Unsupported`: there is no other reader
+        // that would do better with it.
+        [] => {
+            return Err(Error::Corrupt(
+                "descriptor declares no extent, so nothing says where the disk's data is",
+            ))
+        }
+        _ => {
+            return Err(Error::Unsupported(
+                "a descriptor with more than one extent — the rest of the disk is in                  sibling files this crate does not open, and reading only the first                  would serve zeros or wrong bytes for everything past it",
+            ))
+        }
+    };
+
+    if !extent.kind.eq_ignore_ascii_case("SPARSE") {
+        return Err(Error::Unsupported(
+            "the descriptor's extent is not SPARSE, so the data is not laid out the way              a sparse extent's grain directory describes",
+        ));
+    }
+
+    if extent.sectors != header.capacity {
+        return Err(Error::Corrupt(
+            "the descriptor's extent length and the header's capacity disagree about              how big this disk is",
+        ));
+    }
+
+    Ok(())
+}
+
 /// The same string [`Descriptor::parse`] returns for
 /// `createType="vmfsSparse"`. One layout, one message, whichever file
 /// named it — a corruption test asserts the two stay equal.
