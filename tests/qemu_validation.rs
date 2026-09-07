@@ -325,6 +325,137 @@ fn qemu_still_opens_an_image_after_we_write_into_a_zeroed_grain() {
     assert_eq!(&out[..at], &data[..at]);
 }
 
+/// Both grain directories of an image, and the grain tables they name.
+///
+/// A sparse VMDK carries a second, redundant copy of the directory and
+/// of every table, and announces it through bit 1 of the header's
+/// `flags`. qemu and VMware both set that bit on every sparse extent
+/// they produce, so this is the ordinary layout rather than an exotic
+/// one.
+struct Directories {
+    /// Which directory slots hold a table, primary then redundant. The
+    /// two directories name *different* tables by design, so their raw
+    /// contents differ; what has to agree is which slots are populated.
+    primary_allocated: Vec<bool>,
+    redundant_allocated: Vec<bool>,
+    /// The grain tables themselves, one entry list per directory slot.
+    primary_gts: Vec<Vec<u32>>,
+    redundant_gts: Vec<Vec<u32>>,
+}
+
+fn read_directories(path: &Path) -> Directories {
+    let image = std::fs::read(path).unwrap();
+    let u32_at = |off: usize| u32::from_le_bytes(image[off..off + 4].try_into().unwrap());
+    let u64_at = |off: usize| u64::from_le_bytes(image[off..off + 8].try_into().unwrap());
+
+    let capacity = u64_at(12);
+    let grain_size = u64_at(20);
+    let num_gtes_per_gt = u32_at(44) as u64;
+    let rgd_offset = u64_at(48);
+    let gd_offset = u64_at(56);
+    assert!(
+        u32_at(8) & 0x2 != 0 && rgd_offset != 0,
+        "fixture precondition: the image must declare a redundant grain directory"
+    );
+
+    let gt_count = capacity.div_ceil(grain_size).div_ceil(num_gtes_per_gt) as usize;
+    let sector = 512usize;
+
+    let entries_at = |sector_no: usize, count: usize| -> Vec<u32> {
+        let at = sector_no * sector;
+        image[at..at + count * 4]
+            .chunks_exact(4)
+            .map(|e| u32::from_le_bytes(e.try_into().unwrap()))
+            .collect()
+    };
+    let tables_of = |gd: &[u32]| -> Vec<Vec<u32>> {
+        gd.iter()
+            .map(|&s| {
+                if s == 0 {
+                    Vec::new()
+                } else {
+                    entries_at(s as usize, num_gtes_per_gt as usize)
+                }
+            })
+            .collect()
+    };
+
+    let primary_gd = entries_at(gd_offset as usize, gt_count);
+    let redundant_gd = entries_at(rgd_offset as usize, gt_count);
+    Directories {
+        primary_allocated: primary_gd.iter().map(|&s| s != 0).collect(),
+        redundant_allocated: redundant_gd.iter().map(|&s| s != 0).collect(),
+        primary_gts: tables_of(&primary_gd),
+        redundant_gts: tables_of(&redundant_gd),
+    }
+}
+
+/// Report the first grain-table entry on which the two copies disagree.
+/// Comparing 512-entry tables with `assert_eq!` prints both in full,
+/// which buries the one number that differs.
+fn assert_tables_agree(d: &Directories, whose: &str) {
+    assert_eq!(
+        d.primary_allocated, d.redundant_allocated,
+        "{whose}: one directory has a grain table where the other has none"
+    );
+    for (t, (p, r)) in d.primary_gts.iter().zip(&d.redundant_gts).enumerate() {
+        if let Some(i) = p.iter().zip(r).position(|(a, b)| a != b) {
+            panic!(
+                "{whose}: grain table {t} entry {i} is {} in the primary copy \
+                 and {} in the redundant one",
+                p[i], r[i]
+            );
+        }
+        assert_eq!(p.len(), r.len(), "{whose}: grain table {t} lengths differ");
+    }
+}
+
+/// The redundant grain directory exists to be read when the primary is
+/// damaged, so it has to say the same thing the primary does. A writer
+/// that updates only the primary leaves the redundant copy claiming a
+/// grain is absent when it is on disk — and a tool that falls back to it
+/// then returns zeros for real data, from an image `qemu-img check`
+/// calls clean, because `check` does not consult the redundant tables.
+///
+/// Doing the same write through qemu in the same test is what says the
+/// shape we produce is the shape qemu produces, rather than merely
+/// self-consistent.
+#[test]
+fn a_write_keeps_the_redundant_grain_directory_in_step() {
+    let ours = vmdk_path("rgd-ours");
+    let theirs = vmdk_path("rgd-theirs");
+    qemu_create(&ours, "8M");
+    std::fs::copy(&ours, &theirs).unwrap();
+
+    const AT: u64 = 1024 * 1024;
+    let payload = [0x33u8; 4096];
+
+    let r = VmdkReader::open_rw(&ours).unwrap();
+    r.write_at(AT, &payload).unwrap();
+    r.flush().unwrap();
+    drop(r);
+
+    assert_qemu_io(&[
+        "-f",
+        "vmdk",
+        "-c",
+        &format!("write -P 0x33 {AT} {}", payload.len()),
+        theirs.to_str().unwrap(),
+    ]);
+
+    assert_tables_agree(
+        &read_directories(&theirs),
+        "precondition (qemu's own write)",
+    );
+    assert_tables_agree(&read_directories(&ours), "after our write");
+
+    qemu_check(&ours);
+    let raw = raw_path("rgd-ours");
+    qemu_convert_vmdk_to_raw(&ours, &raw);
+    let out = std::fs::read(&raw).unwrap();
+    assert_eq!(&out[AT as usize..AT as usize + payload.len()], &payload[..]);
+}
+
 /// Cross-write (structural): our writer mutates a qemu-created VMDK,
 /// then qemu-img check validates the grain directory / grain tables.
 #[test]

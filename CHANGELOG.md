@@ -9,6 +9,29 @@ never does.
 
 ### Fixed
 
+- **Writes keep the redundant grain directory in step with the primary.**
+  A sparse VMDK carries a second copy of the grain directory and of every
+  grain table — `rgd_offset`, announced by bit 1 of `flags`, and present
+  on every image qemu and VMware produce. It was parsed and never used,
+  so after a write the two copies disagreed: the primary said a grain was
+  at sector N and the redundant copy still said it was absent. Nothing
+  reported it, because `qemu-img check` does not consult the redundant
+  tables — and the fallback read those tables exist for then returned a
+  hole where the data was. A grain table this crate allocated was worse
+  than stale: it was missing from the redundant directory entirely.
+
+### Changed
+
+- `open_rw` refuses an image whose redundant grain directory does not fit
+  inside the file. A read-only open still succeeds, since reads never
+  consult it.
+
+### Added
+
+- The `FLAG_REDUNDANT_GRAIN_TABLE` constant.
+
+### Fixed
+
 - **Concurrent writes no longer lose data while reporting success.**
   Every structure had its own lock and none was held across the
   test-then-allocate-then-publish sequence that allocation is, so two

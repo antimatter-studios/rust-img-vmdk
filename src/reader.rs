@@ -33,6 +33,27 @@
 //!
 //! with `dev.flush()` between each step. A crash mid-allocation may leak
 //! a grain or grain table but never produces a wrong-data read.
+//!
+//! ## The redundant copies
+//!
+//! A sparse extent carries a second grain directory at `rgd_offset` and
+//! a second copy of every grain table, announced by bit 1 of `flags`.
+//! Nothing on the read path consults them — the primary is what reads
+//! follow — but they are what a recovery tool falls back to when the
+//! primary is damaged, so every directory and table write is mirrored
+//! into them.
+//!
+//! **The redundant copy is written first**, both for a directory entry
+//! and for a table entry, following VMware's convention. A crash between
+//! the two writes then leaves the primary *behind* the redundant copy
+//! rather than ahead of it, so the fallback never claims a grain the
+//! primary has not got.
+//!
+//! An image whose redundant directory does not fit inside the file is
+//! still opened read-only, since reads do not need it. `open_rw` refuses
+//! it: a write would leave a copy we cannot locate saying the wrong
+//! thing, and `qemu-img check` does not look at the redundant tables, so
+//! nothing downstream would report it.
 
 use crate::descriptor::Descriptor;
 use crate::error::{Error, Result};
@@ -64,6 +85,15 @@ pub struct VmdkReader {
     /// Mutex-wrapped because the writer mutates entries in place when
     /// allocating a new grain table.
     gd: Mutex<Vec<u32>>,
+    /// Cached redundant grain directory, when the image declares one
+    /// (`rgd_offset != 0`). `None` for an image without a redundant
+    /// copy, and for a read-only open of an image whose redundant
+    /// directory does not fit the file.
+    ///
+    /// Reads never consult it. It exists so that writes can keep it in
+    /// step with the primary: it is the copy a recovery tool falls back
+    /// to, and a stale one turns real data into a hole.
+    rgd: Option<Mutex<Vec<u32>>>,
     /// Single-slot grain-table cache. Loading a GT means a 2 KiB
     /// (512 entries × 4 bytes) read; caching the most-recent table
     /// keeps sequential reads cheap without holding all GTs resident.
@@ -247,14 +277,45 @@ impl VmdkReader {
             return Err(Error::Corrupt("grain directory extends past EOF"));
         }
 
-        let mut gd_bytes = vec![0u8; gd_byte_len];
-        dev.read_at(gd_byte_off, &mut gd_bytes)
-            .map_err(fs_core_to_vmdk_error)?;
+        let gd = read_directory(&dev, gd_byte_off, gd_byte_len)?;
 
-        let mut gd = Vec::with_capacity(gt_count as usize);
-        for chunk in gd_bytes.chunks_exact(4) {
-            gd.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
+        // The redundant grain directory, when the image has one.
+        //
+        // It is a second copy of the directory and of every table,
+        // announced by bit 1 of `flags`, and every sparse extent qemu
+        // and VMware produce carries it. Nothing on the read path
+        // consults it — the primary is what reads follow — so an image
+        // whose redundant directory does not fit the file is still
+        // perfectly readable and is opened read-only without complaint.
+        //
+        // A read-write open is different. Writing to such an image means
+        // updating a copy we cannot locate, and an image whose two
+        // copies disagree passes `qemu-img check` — which does not look
+        // at the redundant tables — while a tool that falls back to them
+        // reads a hole where the data is. Refusing the write is the only
+        // answer that is visible to anyone.
+        let redundant_gd = if header.rgd_offset == 0 {
+            None
+        } else {
+            let rgd = header
+                .rgd_offset
+                .checked_mul(SECTOR_SIZE)
+                .ok_or(Error::Corrupt("redundant grain directory offset overflows"))
+                .and_then(|off| {
+                    let end = off
+                        .checked_add(gd_byte_len as u64)
+                        .ok_or(Error::Corrupt("redundant grain-directory extent overflow"))?;
+                    if end > dev_size {
+                        return Err(Error::Corrupt("redundant grain directory extends past EOF"));
+                    }
+                    read_directory(&dev, off, gd_byte_len)
+                });
+            match rgd {
+                Ok(entries) => Some(Mutex::new(entries)),
+                Err(e) if writable => return Err(e),
+                Err(_) => None,
+            }
+        };
 
         let virtual_size = header
             .capacity
@@ -312,6 +373,7 @@ impl VmdkReader {
             dev,
             header,
             gd: Mutex::new(gd),
+            rgd: redundant_gd,
             gt_cache: Mutex::new(GtCache {
                 loaded: None,
                 entries: Vec::new(),
@@ -700,44 +762,66 @@ impl VmdkReader {
         Ok(s as u32)
     }
 
-    /// Allocate a fresh, zero-filled grain table at the device tail and
-    /// publish the new GT pointer into the in-memory + on-disk grain
-    /// directory. Returns the sector number of the new GT.
-    ///
-    /// Crash-safety order: zero-init GT data → flush → publish GD entry
-    /// → flush. A crash mid-sequence may leak a grain table but never
-    /// produces a wrong-data read (an absent GD entry reads as zeros).
-    fn allocate_grain_table(&self, gt_idx: usize) -> Result<u32> {
-        let entries_per_gt = self.header.num_gtes_per_gt as u64;
-        // Each entry is 4 bytes; round up to whole sectors.
-        let gt_bytes = entries_per_gt * GD_GT_ENTRY_SIZE;
-        let gt_sectors = gt_bytes.div_ceil(SECTOR_SIZE);
-        let new_gt_sector_u64 = self.allocate_sectors(gt_sectors)?;
-        if new_gt_sector_u64 > u32::MAX as u64 {
+    /// How many sectors one grain table occupies.
+    fn grain_table_sectors(&self) -> u64 {
+        ((self.header.num_gtes_per_gt as u64) * GD_GT_ENTRY_SIZE).div_ceil(SECTOR_SIZE)
+    }
+
+    /// Allocate a fresh, zero-filled grain table at the device tail.
+    fn allocate_blank_grain_table(&self) -> Result<u32> {
+        let gt_sectors = self.grain_table_sectors();
+        let sector = self.allocate_sectors(gt_sectors)?;
+        if sector > u32::MAX as u64 {
             return Err(Error::Unsupported("grain table sector past u32 range"));
         }
-        let new_gt_sector = new_gt_sector_u64 as u32;
-
-        // Step 1: zero-init the new GT on disk.
         let zeros = vec![0u8; (gt_sectors * SECTOR_SIZE) as usize];
-        self.dev_write(new_gt_sector_u64 * SECTOR_SIZE, &zeros)?;
+        self.dev_write(sector * SECTOR_SIZE, &zeros)?;
         self.dev_flush()?;
+        Ok(sector as u32)
+    }
 
-        // Step 2: publish the GD entry. Update on-disk GD slot then
-        // mirror in-memory; hold the lock across both so a concurrent
-        // reader never sees a memory/disk mismatch.
-        {
-            let mut gd = self.gd.lock().unwrap();
-            if gt_idx >= gd.len() {
-                return Err(Error::Corrupt("gt_idx past grain directory"));
-            }
-            let gd_entry_off =
-                self.header.gd_offset * SECTOR_SIZE + (gt_idx as u64) * GD_GT_ENTRY_SIZE;
-            let bytes = new_gt_sector.to_le_bytes();
-            self.dev_write(gd_entry_off, &bytes)?;
-            self.dev_flush()?;
-            gd[gt_idx] = new_gt_sector;
+    /// Publish `gt_sector` into slot `gt_idx` of one grain directory, on
+    /// disk and in the cached copy.
+    ///
+    /// Holds the in-memory lock across both so a concurrent reader never
+    /// sees a memory/disk mismatch.
+    fn publish_directory_entry(
+        &self,
+        cached: &Mutex<Vec<u32>>,
+        dir_offset_sectors: u64,
+        gt_idx: usize,
+        gt_sector: u32,
+    ) -> Result<()> {
+        let mut dir = cached.lock().unwrap();
+        if gt_idx >= dir.len() {
+            return Err(Error::Corrupt("gt_idx past grain directory"));
         }
+        let entry_off = dir_offset_sectors * SECTOR_SIZE + (gt_idx as u64) * GD_GT_ENTRY_SIZE;
+        self.dev_write(entry_off, &gt_sector.to_le_bytes())?;
+        self.dev_flush()?;
+        dir[gt_idx] = gt_sector;
+        Ok(())
+    }
+
+    /// Allocate a grain table for `gt_idx` in both directories and
+    /// return the primary's sector number.
+    ///
+    /// Crash-safety order: zero-init both tables → publish the
+    /// **redundant** directory entry → publish the primary. VMware's
+    /// convention is that the redundant copy leads, so a crash leaves
+    /// the primary behind rather than ahead, and a recovery tool that
+    /// falls back to the redundant copy never finds it claiming a grain
+    /// the primary has not got. Either way a crash may leak a grain
+    /// table but never produces a wrong-data read: an absent directory
+    /// entry reads as zeros.
+    fn allocate_grain_table(&self, gt_idx: usize) -> Result<u32> {
+        let new_gt_sector = self.allocate_blank_grain_table()?;
+
+        if let Some(rgd) = &self.rgd {
+            let redundant = self.allocate_blank_grain_table()?;
+            self.publish_directory_entry(rgd, self.header.rgd_offset, gt_idx, redundant)?;
+        }
+        self.publish_directory_entry(&self.gd, self.header.gd_offset, gt_idx, new_gt_sector)?;
 
         // Invalidate the GT cache slot if it happened to hold this index
         // (it can't have meaningful contents — the GT was just zeroed —
@@ -751,8 +835,46 @@ impl VmdkReader {
         Ok(new_gt_sector)
     }
 
-    /// Overwrite a single grain-table entry on disk and refresh the
-    /// in-memory cache if it currently holds this GT.
+    /// The redundant copy of grain table `gt_idx`, if this image has a
+    /// redundant directory.
+    ///
+    /// An image written by a tool that only maintained the primary can
+    /// have a primary table where the redundant directory has none.
+    /// Rather than skip the mirror — which would leave the copy wrong
+    /// for every entry, not just the new one — a table is allocated and
+    /// seeded with the primary's current contents, so the redundant copy
+    /// becomes correct rather than merely no worse.
+    fn redundant_gt_sector(&self, gt_idx: usize, primary_gt_sector: u32) -> Result<Option<u32>> {
+        let Some(rgd) = &self.rgd else {
+            return Ok(None);
+        };
+        let existing = {
+            let dir = rgd.lock().unwrap();
+            *dir.get(gt_idx)
+                .ok_or(Error::Corrupt("gt_idx past redundant grain directory"))?
+        };
+        if existing != 0 {
+            return Ok(Some(existing));
+        }
+
+        let sector = self.allocate_blank_grain_table()?;
+        let len = (self.grain_table_sectors() * SECTOR_SIZE) as usize;
+        let mut primary = vec![0u8; len];
+        self.dev_read((primary_gt_sector as u64) * SECTOR_SIZE, &mut primary)?;
+        self.dev_write((sector as u64) * SECTOR_SIZE, &primary)?;
+        self.dev_flush()?;
+        self.publish_directory_entry(rgd, self.header.rgd_offset, gt_idx, sector)?;
+        Ok(Some(sector))
+    }
+
+    /// Overwrite a single grain-table entry, in both copies of the
+    /// table, and refresh the in-memory cache if it currently holds
+    /// this GT.
+    ///
+    /// The redundant copy is written first, for the same reason the
+    /// redundant directory entry is: a crash between the two writes
+    /// should leave the primary behind the redundant copy rather than
+    /// ahead of it.
     fn update_gt_entry(
         &self,
         gt_idx: usize,
@@ -760,9 +882,15 @@ impl VmdkReader {
         gt_sector: u32,
         new_grain_sector: u32,
     ) -> Result<()> {
-        let entry_off = (gt_sector as u64) * SECTOR_SIZE + (gte_idx as u64) * GD_GT_ENTRY_SIZE;
         let bytes = new_grain_sector.to_le_bytes();
-        self.dev_write(entry_off, &bytes)?;
+        let entry_within = (gte_idx as u64) * GD_GT_ENTRY_SIZE;
+
+        if let Some(redundant) = self.redundant_gt_sector(gt_idx, gt_sector)? {
+            self.dev_write((redundant as u64) * SECTOR_SIZE + entry_within, &bytes)?;
+            self.dev_flush()?;
+        }
+
+        self.dev_write((gt_sector as u64) * SECTOR_SIZE + entry_within, &bytes)?;
         self.dev_flush()?;
 
         let mut cache = self.gt_cache.lock().unwrap();
@@ -771,6 +899,18 @@ impl VmdkReader {
         }
         Ok(())
     }
+}
+
+/// Read one grain directory: `len` bytes of little-endian `u32` sector
+/// numbers at byte offset `off`.
+fn read_directory(dev: &Arc<dyn BlockDevice>, off: u64, len: usize) -> Result<Vec<u32>> {
+    let mut bytes = vec![0u8; len];
+    dev.read_at(off, &mut bytes)
+        .map_err(fs_core_to_vmdk_error)?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

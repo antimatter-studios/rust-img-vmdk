@@ -17,7 +17,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use fs_core::{BlockDevice, BlockRead, FileDevice};
-use vmdk::header::{offsets, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC};
+use vmdk::header::{
+    offsets, FLAG_REDUNDANT_GRAIN_TABLE, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC,
+};
 use vmdk::VmdkReader;
 
 mod common;
@@ -154,6 +156,83 @@ fn build_fully_sparse_two_gts(path: &std::path::Path) {
     f.write_all_at(&descriptor, DESC_OFF_SECTOR * SECTOR)
         .unwrap();
     f.write_all_at(&gd_sector, GD_OFF_SECTOR * SECTOR).unwrap();
+}
+
+/// Layout for a fixture that carries a **redundant** grain directory,
+/// the way every sparse VMDK qemu and VMware produce does.
+///
+/// The redundant copy comes first in the file, mirroring the order those
+/// tools use: redundant directory, redundant table, primary directory,
+/// primary table, then the grains.
+const RGD_OFF_SECTOR: u64 = 2;
+const RGT_OFF_SECTOR: u64 = 3; // sectors 3..6
+const RGD_GD_OFF_SECTOR: u64 = 7;
+const RGD_GT_OFF_SECTOR: u64 = 8; // sectors 8..11
+const RGD_GRAIN0_OFF_SECTOR: u64 = 12;
+
+/// Build a 1 MiB sparse VMDK with both grain directories present, no
+/// grains allocated, and `flags` declaring the redundant copy live.
+fn build_with_redundant_directory(path: &std::path::Path) {
+    let mut h = build_header();
+    h[8..12].copy_from_slice(&FLAG_REDUNDANT_GRAIN_TABLE.to_le_bytes());
+    h[48..56].copy_from_slice(&RGD_OFF_SECTOR.to_le_bytes());
+    h[56..64].copy_from_slice(&RGD_GD_OFF_SECTOR.to_le_bytes());
+    h[64..72].copy_from_slice(&RGD_GRAIN0_OFF_SECTOR.to_le_bytes());
+
+    let mut rgd_sector = [0u8; SECTOR as usize];
+    rgd_sector[0..4].copy_from_slice(&(RGT_OFF_SECTOR as u32).to_le_bytes());
+    let mut gd_sector = [0u8; SECTOR as usize];
+    gd_sector[0..4].copy_from_slice(&(RGD_GT_OFF_SECTOR as u32).to_le_bytes());
+
+    let gt_bytes = vec![0u8; (NUM_GTES_PER_GT as usize) * 4];
+
+    let mut f = File::create(path).unwrap();
+    f.set_len(RGD_GRAIN0_OFF_SECTOR * SECTOR).unwrap();
+    f.write_all_at(&h, 0).unwrap();
+    f.write_all_at(&build_descriptor_sector(), DESC_OFF_SECTOR * SECTOR)
+        .unwrap();
+    f.write_all_at(&rgd_sector, RGD_OFF_SECTOR * SECTOR)
+        .unwrap();
+    f.write_all_at(&gt_bytes, RGT_OFF_SECTOR * SECTOR).unwrap();
+    f.write_all_at(&gd_sector, RGD_GD_OFF_SECTOR * SECTOR)
+        .unwrap();
+    f.write_all_at(&gt_bytes, RGD_GT_OFF_SECTOR * SECTOR)
+        .unwrap();
+}
+
+/// Read a whole grain table as sector numbers.
+fn read_grain_table(path: &std::path::Path, gt_sector: u32) -> Vec<u32> {
+    let mut f = File::open(path).unwrap();
+    f.seek(SeekFrom::Start((gt_sector as u64) * SECTOR))
+        .unwrap();
+    let mut bytes = vec![0u8; (NUM_GTES_PER_GT as usize) * 4];
+    f.read_exact(&mut bytes).unwrap();
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+/// Report the first grain-table entry on which two copies disagree.
+/// `assert_eq!` on 512-entry tables prints both in full, which buries
+/// the one number that differs.
+fn assert_tables_agree(primary: &[u32], redundant: &[u32]) {
+    assert_eq!(primary.len(), redundant.len(), "grain table lengths differ");
+    if let Some(i) = primary.iter().zip(redundant).position(|(a, b)| a != b) {
+        panic!(
+            "grain table entry {i} is {} in the primary copy and {} in the redundant one",
+            primary[i], redundant[i]
+        );
+    }
+}
+
+fn read_directory_entry(path: &std::path::Path, dir_sector: u64, idx: u64) -> u32 {
+    let mut f = File::open(path).unwrap();
+    f.seek(SeekFrom::Start(dir_sector * SECTOR + idx * 4))
+        .unwrap();
+    let mut bytes = [0u8; 4];
+    f.read_exact(&mut bytes).unwrap();
+    u32::from_le_bytes(bytes)
 }
 
 fn read_grain_sector_value(path: &std::path::Path, gt_sector: u32, gte_idx: u64) -> u32 {
@@ -613,6 +692,113 @@ fn concurrent_writers_into_one_sparse_grain_all_survive() {
         drop(r);
         let _ = std::fs::remove_file(&path);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 8. the redundant grain directory
+// ---------------------------------------------------------------------------
+
+/// A sparse VMDK carries a second copy of the grain directory and of
+/// every grain table, and every image qemu or VMware produces declares
+/// it live. It exists to be read when the primary is damaged, so a write
+/// that updates only the primary leaves it claiming a grain is absent
+/// when the data is on disk — and the recovery it exists for then
+/// returns a hole.
+///
+/// Nothing catches that at the time: `qemu-img check` does not consult
+/// the redundant tables, so the image passes.
+#[test]
+fn a_write_updates_both_copies_of_the_grain_table() {
+    let path = tmp_path("redundant_dirs");
+    build_with_redundant_directory(&path);
+
+    let payload = [0x7Eu8; 4096];
+    let r = VmdkReader::open_rw(&path).unwrap();
+    // Grain 3 — sparse, in a grain table that already exists in both
+    // directories.
+    r.write_at(3 * GRAIN_SIZE * SECTOR, &payload).unwrap();
+    r.flush().unwrap();
+    drop(r);
+
+    let primary = read_grain_table(&path, RGD_GT_OFF_SECTOR as u32);
+    let redundant = read_grain_table(&path, RGT_OFF_SECTOR as u32);
+    assert!(primary[3] != 0, "the primary table must name the new grain");
+    assert_tables_agree(&primary, &redundant);
+
+    // And the data is still readable, i.e. the mirror did not scribble
+    // over the grain it was describing.
+    let r = VmdkReader::open(&path).unwrap();
+    let mut got = [0u8; 4096];
+    r.read_at(3 * GRAIN_SIZE * SECTOR, &mut got).unwrap();
+    assert_eq!(got, payload);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A grain table this crate allocates has to appear in *both*
+/// directories. Publishing it into the primary alone leaves the
+/// redundant directory with no table at all for that slot, which is
+/// worse than a stale entry: every grain in it is invisible to a
+/// fallback read, not just the one just written.
+#[test]
+fn an_allocated_grain_table_appears_in_both_directories() {
+    let path = tmp_path("redundant_alloc_gt");
+    build_with_redundant_directory(&path);
+    // Empty both directory slots so the write has to allocate a table.
+    let zeroed = [0u8; 4];
+    let mut f = OpenOptions::new().write(true).open(&path).unwrap();
+    f.write_all_at(&zeroed, RGD_OFF_SECTOR * SECTOR).unwrap();
+    f.write_all_at(&zeroed, RGD_GD_OFF_SECTOR * SECTOR).unwrap();
+    drop(f);
+
+    let payload = [0x5Cu8; 512];
+    let r = VmdkReader::open_rw(&path).unwrap();
+    r.write_at(0, &payload).unwrap();
+    r.flush().unwrap();
+    drop(r);
+
+    let primary_gt = read_directory_entry(&path, RGD_GD_OFF_SECTOR, 0);
+    let redundant_gt = read_directory_entry(&path, RGD_OFF_SECTOR, 0);
+    assert!(primary_gt != 0, "the primary directory must name a table");
+    assert!(
+        redundant_gt != 0,
+        "the redundant directory has no grain table for a slot the primary does"
+    );
+    assert_ne!(
+        primary_gt, redundant_gt,
+        "the two copies must be distinct tables, not the same one twice"
+    );
+    assert_tables_agree(
+        &read_grain_table(&path, primary_gt),
+        &read_grain_table(&path, redundant_gt),
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The redundant directory is not consulted on the read path, so an
+/// image whose redundant directory does not fit the file is perfectly
+/// readable and opens read-only. Opening it for *writing* is what cannot
+/// be honoured: the copy a recovery tool falls back to would be left
+/// wrong, and nothing downstream would notice.
+#[test]
+fn an_unreachable_redundant_directory_reads_but_refuses_to_open_rw() {
+    let path = tmp_path("redundant_past_eof");
+    build_with_redundant_directory(&path);
+    let mut f = OpenOptions::new().write(true).open(&path).unwrap();
+    f.write_all_at(&1_000_000u64.to_le_bytes(), 48).unwrap();
+    drop(f);
+
+    VmdkReader::open(&path).expect("a read-only open does not need the redundant copy");
+    let err = VmdkReader::open_rw(&path)
+        .err()
+        .expect("expected a refusal, got Ok");
+    assert!(
+        format!("{err}").contains("redundant grain directory"),
+        "the refusal must name the redundant directory, got {err}"
+    );
+
+    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------

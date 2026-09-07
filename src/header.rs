@@ -29,6 +29,15 @@ use crate::error::{Error, Result};
 pub const HEADER_SIZE: usize = 512;
 pub const MAGIC: u32 = 0x564D_444B; // 'KDMV' little-endian on disk
 
+/// `flags` bit 1 — **the image carries a redundant grain table**.
+///
+/// A second copy of the grain directory, and of every grain table, kept
+/// at `rgd_offset`. It exists to be read when the primary is damaged, so
+/// a writer that leaves it stale turns real data into a hole for exactly
+/// the recovery it was there for. qemu and VMware set this bit on every
+/// sparse extent they produce.
+pub const FLAG_REDUNDANT_GRAIN_TABLE: u32 = 0x2;
+
 /// `flags` bit 2 — **the image uses the zeroed-grain marker**.
 ///
 /// When set, the grain-table entry [`GTE_ZEROED_GRAIN`] is a sentinel
