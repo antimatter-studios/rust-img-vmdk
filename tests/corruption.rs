@@ -427,3 +427,49 @@ fn an_esxi_vmfs_sparse_extent_is_refused_as_vmfs_sparse_not_as_not_a_vmdk() {
         "the same layout must be refused with the same message whichever file names it"
     );
 }
+
+/// A split disk's extents each carry a sparse header with a descriptor
+/// region reserved and left empty, because the descriptor for a split
+/// disk lives in the sidecar `.vmdk`. The parser saw a run of NULs, no
+/// `createType`, and answered `Corrupt` — about a healthy, complete
+/// file.
+///
+/// `Corrupt` and `Unsupported` are the two verdicts this crate offers
+/// and they mean opposite things: one says the file is damaged, which
+/// invites a warning, a repair, or a refusal to trust the disk; the
+/// other says use a different reader or convert it. Only a descriptor
+/// region with content that fails to parse deserves the first.
+#[test]
+fn an_empty_descriptor_region_is_a_split_extent_not_a_corrupt_image() {
+    let path = tmp_path("empty_descriptor");
+    build_valid(&path);
+    patch(&path, DESC_OFF_SECTOR * SECTOR, &[0u8; SECTOR as usize]);
+
+    match VmdkReader::open(&path) {
+        Err(Error::Unsupported(msg)) => assert!(
+            msg.contains("extent"),
+            "the refusal must say this is one extent of a split image, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other}"),
+        Ok(_) => panic!("opened an extent of a split image as if it were a whole disk"),
+    }
+}
+
+/// The distinction the change rests on: a descriptor region with content
+/// the parser cannot make sense of is still `Corrupt`. Widening the
+/// empty case must not turn every unreadable descriptor into "this is a
+/// split image".
+#[test]
+fn a_descriptor_region_with_unparseable_content_is_still_corrupt() {
+    let path = tmp_path("junk_descriptor");
+    build_valid(&path);
+    let mut junk = [0u8; SECTOR as usize];
+    junk[..21].copy_from_slice(b"this is not an image\n");
+    patch(&path, DESC_OFF_SECTOR * SECTOR, &junk);
+
+    match VmdkReader::open(&path) {
+        Err(Error::Corrupt(msg)) => assert!(msg.contains("createType"), "got {msg:?}"),
+        Err(other) => panic!("expected Corrupt, got {other}"),
+        Ok(_) => panic!("opened an image whose descriptor says nothing"),
+    }
+}

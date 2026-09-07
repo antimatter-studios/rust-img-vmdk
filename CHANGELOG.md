@@ -9,6 +9,18 @@ never does.
 
 ### Fixed
 
+- **A split-sparse extent is unsupported, not corrupt.** Each extent of a
+  split disk carries a sparse header whose descriptor region is reserved
+  and left empty, because the descriptor lives in the sidecar `.vmdk`.
+  The parser saw a run of NULs, found no `createType`, and answered
+  `Corrupt` about a healthy and complete file. The two verdicts mean
+  opposite things to a caller — one invites a warning, a repair, or a
+  refusal to trust the disk; the other says to use a different reader —
+  so an empty descriptor region is now read as the positive signal it is.
+  A region with *content* that fails to parse is still `Corrupt`.
+
+### Fixed
+
 - **A sparse-extent revision this crate cannot read is refused by its
   version.** The header's format revision was parsed and never compared
   to anything, so an image declaring any revision at all was read with
