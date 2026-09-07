@@ -9,6 +9,28 @@ never does.
 
 ### Fixed
 
+- **A sparse-extent revision this crate cannot read is refused by its
+  version.** The header's format revision was parsed and never compared
+  to anything, so an image declaring any revision at all was read with
+  version-1 semantics. Version 3 — the stream-optimized layout, with
+  compressed grains, grain markers and a footer replacing the header —
+  was refused only by a *second* field, `compressAlgorithm`, which leaves
+  the refusal resting on the one place the format states the fact twice;
+  an image making only the first statement walked through. Versions 1 and
+  2 are both accepted: `qemu-img` writes 2 for a monolithic sparse extent
+  carrying the zeroed-grain marker, which this crate reads.
+- **An ESXi `vmfsSparse` extent is refused as `vmfsSparse`, not as "not a
+  VMDK".** Its magic is `COWD` rather than `KDMV`, so it failed the magic
+  test — the same wrong verdict the flat layouts used to get, by a
+  different route. The descriptor parser has carried a stable
+  `vmfsSparse` message all along that nothing could reach.
+
+### Added
+
+- `header::SUPPORTED_VERSIONS` and `header::MAGIC_VMFS_SPARSE`.
+
+### Fixed
+
 - **A one-sector write no longer allocates whatever `num_gtes_per_gt`
   asks for.** The read path bounds a grain table against the file before
   loading it; the write path *creates* one, so nothing preceded it, and

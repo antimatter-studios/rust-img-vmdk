@@ -262,6 +262,7 @@ fn delta_disk_declaring_a_parent_is_refused_at_open() {
 
 const OFF_GRAIN_SIZE: u64 = vmdk::header::offsets::GRAIN_SIZE as u64;
 const OFF_NUM_GTES_PER_GT: u64 = vmdk::header::offsets::NUM_GTES_PER_GT as u64;
+const OFF_VERSION: u64 = vmdk::header::offsets::VERSION as u64;
 
 /// `grain_size` is a sector count, and the reader turns it into bytes
 /// by multiplying by 512. The only thing checked was that it was not
@@ -345,5 +346,84 @@ fn a_one_sector_write_does_not_allocate_whatever_the_header_asks_for() {
     assert_eq!(
         before, after,
         "the image grew from {before} to {after} bytes for a 512-byte write"
+    );
+}
+
+/// The sparse-extent header states a format revision, and the revision
+/// changes what the rest of the file means. It was parsed and never
+/// compared to anything, so an image declaring any revision at all was
+/// read with version-1 semantics.
+///
+/// Version 3 is the stream-optimized revision: compressed grains, grain
+/// markers, and a footer that replaces the header at the end of the
+/// file. None of that is a layout this crate can walk. It happened to be
+/// refused today by a *second* field — `compressAlgorithm` — which
+/// leaves the refusal resting on the one place the format states the
+/// fact twice. A version-3 image with `compressAlgorithm` left at zero,
+/// which the field's own definition permits, walked straight through.
+#[test]
+fn a_sparse_extent_revision_we_cannot_read_is_refused_by_its_version() {
+    let path = tmp_path("version_3");
+    build_valid(&path);
+    patch(&path, OFF_VERSION, &3u32.to_le_bytes());
+
+    match VmdkReader::open(&path) {
+        Err(Error::Unsupported(msg)) => assert!(
+            msg.contains("version 3"),
+            "the refusal must name the revision, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other}"),
+        Ok(_) => panic!("read a stream-optimized extent with version-1 semantics"),
+    }
+}
+
+/// Versions 1 and 2 are both ordinary monolithic sparse extents, and
+/// both are read here. `qemu-img` writes 1 for a plain image and 2 when
+/// the image uses the zeroed-grain marker — which this crate reads, and
+/// has a cross-validation test for — so refusing everything but 1 would
+/// refuse images the suite itself produces.
+#[test]
+fn the_revisions_we_do_read_are_both_accepted() {
+    for version in [1u32, 2] {
+        let path = tmp_path(&format!("version_{version}"));
+        build_valid(&path);
+        patch(&path, OFF_VERSION, &version.to_le_bytes());
+
+        let r = VmdkReader::open(&path)
+            .unwrap_or_else(|e| panic!("version {version} must be readable, got {e}"));
+        let mut buf = [0u8; 8];
+        r.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, [0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+}
+
+/// An ESXi `vmfsSparse` extent — a delta or redo log — is a VMDK sparse
+/// extent with a different four-byte magic, `COWD`, and a differently
+/// laid out header. Failing the `KDMV` test made it "not a VMDK image",
+/// which is the same wrong verdict the flat layouts used to get, by a
+/// different route.
+///
+/// `descriptor.rs` has carried a stable `vmfsSparse` message all along
+/// and nothing could reach it, because the header rejected the file
+/// first. The two paths now give the same answer.
+#[test]
+fn an_esxi_vmfs_sparse_extent_is_refused_as_vmfs_sparse_not_as_not_a_vmdk() {
+    let path = tmp_path("cowd");
+    build_valid(&path);
+    patch(&path, 0, b"COWD");
+
+    let from_header = match VmdkReader::open(&path) {
+        Err(Error::Unsupported(msg)) => msg,
+        Err(other) => panic!("expected Unsupported, got {other}"),
+        Ok(_) => panic!("read a vmfsSparse extent as if it were monolithicSparse"),
+    };
+
+    let from_descriptor = match vmdk::descriptor::Descriptor::parse("createType=\"vmfsSparse\"\n") {
+        Err(Error::Unsupported(msg)) => msg,
+        other => panic!("expected Unsupported from the descriptor, got {other:?}"),
+    };
+    assert_eq!(
+        from_header, from_descriptor,
+        "the same layout must be refused with the same message whichever file names it"
     );
 }

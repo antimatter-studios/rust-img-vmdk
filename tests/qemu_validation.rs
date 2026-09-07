@@ -292,6 +292,70 @@ fn a_flat_or_split_descriptor_names_its_create_type_rather_than_denying_it_is_a_
     }
 }
 
+/// Which sparse-extent revisions this crate accepts is a question about
+/// real files, not about the spec, so it is pinned against real files.
+///
+/// `qemu-img` writes version 1 for a plain monolithic sparse extent and
+/// **2** for the same image when it carries the zeroed-grain marker —
+/// which this crate reads, and has two tests above for. Accepting only
+/// version 1, which is what the header field's own documentation would
+/// suggest, would refuse images this very suite produces.
+///
+/// Version 3 is the stream-optimized revision and is refused. It was
+/// already refused in practice, but by `compressAlgorithm` rather than
+/// by the version — the one place the format states the same fact twice,
+/// which leaves an image making only the first statement to walk
+/// through.
+#[test]
+fn the_revisions_qemu_writes_are_the_revisions_we_accept() {
+    let dir = TempDir::new("versions");
+    let raw = dir.join("src.raw");
+    std::fs::write(&raw, pattern(2 * 1024 * 1024)).unwrap();
+
+    let plain = dir.join("plain.vmdk");
+    qemu_convert_raw_to_vmdk(&raw, &plain);
+    assert_eq!(VmdkReader::open(&plain).unwrap().header().version, 1);
+
+    let zeroed = dir.join("zeroed.vmdk");
+    assert_qemu(&[
+        "convert",
+        "-f",
+        "raw",
+        "-O",
+        "vmdk",
+        "-o",
+        "subformat=monolithicSparse,zeroed_grain=on",
+        raw.to_str().unwrap(),
+        zeroed.to_str().unwrap(),
+    ]);
+    let r = VmdkReader::open(&zeroed).expect("a zeroed-grain image is version 2 and readable");
+    assert_eq!(r.header().version, 2);
+    let mut buf = vec![0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, pattern(4096));
+
+    let stream = dir.join("stream.vmdk");
+    assert_qemu(&[
+        "convert",
+        "-f",
+        "raw",
+        "-O",
+        "vmdk",
+        "-o",
+        "subformat=streamOptimized",
+        raw.to_str().unwrap(),
+        stream.to_str().unwrap(),
+    ]);
+    match VmdkReader::open(&stream) {
+        Err(vmdk::Error::Unsupported(msg)) => assert!(
+            msg.contains("version 3"),
+            "a stream-optimized extent must be refused by its revision, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other}"),
+        Ok(_) => panic!("opened a stream-optimized extent"),
+    }
+}
+
 /// A file that is neither a sparse extent nor a descriptor is still not
 /// a VMDK. Widening the door for descriptor files must not turn the
 /// probe into one that accepts anything.

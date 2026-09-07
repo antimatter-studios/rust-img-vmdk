@@ -23,7 +23,9 @@ suitable for FFI from C/C++/Go/Swift.
 - [ ] `twoGbMaxExtentSparse` / `twoGbMaxExtentFlat` (split-extent
       variants used for FAT32 hosts)
 - [ ] `streamOptimized` (DEFLATE-compressed grains used by OVF)
-- [ ] `vmfs` / `vmfsSparse` (ESXi-native; rarely seen outside ESXi)
+- [ ] `vmfs` / `vmfsSparse` (ESXi-native; rarely seen outside ESXi). A
+      `vmfsSparse` extent carries the magic `COWD` rather than `KDMV` and
+      is refused by name rather than reported as not a VMDK.
 
 Variants other than `monolithicSparse` return a clear "unsupported"
 error rather than misreading the image. That includes the ones whose
