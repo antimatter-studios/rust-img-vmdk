@@ -938,9 +938,30 @@ fn looks_like_a_sparse_extent(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Resu
     if dev_size < HEADER_SIZE as u64 {
         return Ok(false);
     }
+    let magic = head_magic(dev)?;
+    // An ESXi vmfsSparse extent is a sparse extent too — a delta disk or
+    // redo log — laid out differently from the header outwards. Saying
+    // "not a VMDK image" about one is the same wrong verdict the flat
+    // layouts used to get, arriving by a different route, so it is named
+    // here with the message the descriptor path already gives the same
+    // `createType`.
+    if magic == crate::header::MAGIC_VMFS_SPARSE {
+        return Err(Error::Unsupported(VMFS_SPARSE_UNSUPPORTED));
+    }
+    Ok(magic == crate::header::MAGIC)
+}
+
+/// The refusal for an ESXi `vmfsSparse` extent.
+///
+/// The same string [`Descriptor::parse`] returns for
+/// `createType="vmfsSparse"`. One layout, one message, whichever file
+/// named it — a corruption test asserts the two stay equal.
+const VMFS_SPARSE_UNSUPPORTED: &str = "vmfsSparse";
+
+fn head_magic(dev: &Arc<dyn BlockDevice>) -> Result<u32> {
     let mut magic = [0u8; 4];
     dev.read_at(0, &mut magic).map_err(fs_core_to_vmdk_error)?;
-    Ok(u32::from_le_bytes(magic) == crate::header::MAGIC)
+    Ok(u32::from_le_bytes(magic))
 }
 
 /// The verdict on a file that is not a sparse extent.

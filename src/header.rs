@@ -29,6 +29,51 @@ use crate::error::{Error, Result};
 pub const HEADER_SIZE: usize = 512;
 pub const MAGIC: u32 = 0x564D_444B; // 'KDMV' little-endian on disk
 
+/// `COWD` — the magic on an ESXi `vmfsSparse` extent: a delta disk or
+/// redo log, laid out differently from a `KDMV` sparse extent from the
+/// header outwards.
+///
+/// This crate reads none of it. It is recognised anyway because the file
+/// *is* a VMDK sparse extent, and "not a VMDK image" is the wrong thing
+/// to say about one — [`crate::descriptor`] has carried a stable
+/// `vmfsSparse` refusal all along that nothing could reach, because the
+/// magic test rejected the file first.
+pub const MAGIC_VMFS_SPARSE: u32 = 0x4457_4F43;
+
+/// The sparse-extent format revisions this crate reads.
+///
+/// The revision is not decorative: it says what the rest of the file
+/// means. `qemu-img` writes 1 for an ordinary monolithic sparse extent
+/// and **2** for the same image when it carries the zeroed-grain
+/// marker — measured on `qemu-img 10.2.2`, and read correctly here, so
+/// accepting only 1 would refuse images this crate's own cross-validation
+/// suite produces.
+///
+/// 3 is the stream-optimized revision (compressed grains, grain markers,
+/// and a footer that replaces the header at the end of the file), which
+/// is a layout this crate cannot walk.
+pub const SUPPORTED_VERSIONS: &[u32] = &[1, 2];
+
+/// What [`Error::Unsupported`] says about a revision we do not read.
+///
+/// The error carries a `&'static str`, so the number cannot be
+/// interpolated; the set of revisions that exist is small and closed
+/// enough to name.
+fn unsupported_version_message(version: u32) -> &'static str {
+    match version {
+        0 => "sparse extent version 0",
+        3 => {
+            "sparse extent version 3 — the stream-optimized revision: compressed \
+              grains, grain markers, and a footer replacing the header at the end \
+              of the file"
+        }
+        _ => {
+            "sparse extent version other than 1 or 2, which are the revisions this \
+              crate reads"
+        }
+    }
+}
+
 /// The largest grain table this reader will accept, in entries.
 ///
 /// `numGTEsPerGT` is 512 in every image the reference producers write —
@@ -156,6 +201,16 @@ impl SparseHeader {
             return Err(Error::NotVmdk);
         }
         let version = read_u32(bytes, offsets::VERSION);
+        // Checked before the field-by-field tests below, because those
+        // read the version-1 layout and a different revision may not
+        // have it. Refusing version 3 here rather than at the
+        // compression test below is the point of the check: the format
+        // states the stream-optimized fact twice, and resting the
+        // refusal on the second statement means an image that makes only
+        // the first one walks through.
+        if !SUPPORTED_VERSIONS.contains(&version) {
+            return Err(Error::Unsupported(unsupported_version_message(version)));
+        }
         let flags = read_u32(bytes, offsets::FLAGS);
         let capacity = read_u64(bytes, offsets::CAPACITY);
         let grain_size = read_u64(bytes, offsets::GRAIN_SIZE);
