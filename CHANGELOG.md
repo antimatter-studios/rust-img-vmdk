@@ -7,6 +7,28 @@ never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A zeroed grain reads as zeros, not as the descriptor.** A grain-table
+  entry of `1` is the format's zeroed-grain marker — "present and entirely
+  zero" — announced by bit 2 of the header's `flags`. That flags word was
+  parsed and never read, so the marker was followed as if it were host
+  sector 1, which is where the embedded descriptor lives: a region the
+  guest had zeroed came back as the image's own ASCII configuration text,
+  with no error. Writing into such a grain landed the payload on the
+  descriptor and left a file `qemu-img` could no longer open.
+- **A grain pointer into the image's own metadata is refused.** The grain
+  *table* pointer had been bounds-checked since it was written; the grain
+  pointer was checked only by the read failing past EOF. A pointer that
+  lands inside the header, the descriptor or a grain directory is now an
+  error rather than plausible-looking bytes.
+
+### Added
+
+- `SparseHeader::uses_zeroed_grain_marker`, plus the `FLAG_ZEROED_GRAIN`
+  and `GTE_ZEROED_GRAIN` constants that name the two halves of the
+  convention.
+
 ## [0.3.5] — 2026-09-06
 
 ### Fixed

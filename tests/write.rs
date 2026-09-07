@@ -17,11 +17,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use fs_core::{BlockDevice, BlockRead, FileDevice};
-use vmdk::header::{HEADER_SIZE, MAGIC};
+use vmdk::header::{offsets, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC};
 use vmdk::VmdkReader;
 
 mod common;
-use common::TempPath;
+use common::{patch, TempPath};
 
 /// Self-deleting, so a panicking assertion leaves nothing behind.
 fn tmp_path(name: &str) -> TempPath {
@@ -412,6 +412,84 @@ fn write_into_grain_with_unallocated_gt_allocates_table_too() {
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// 6. write into a grain carrying the zeroed-grain marker
+// ---------------------------------------------------------------------------
+
+/// A grain-table entry of `1` announces "present and entirely zero". It
+/// is a sentinel, not a sector number, and the sector it would name — 1 —
+/// holds the embedded descriptor.
+///
+/// So a write into such a grain that mistakes the sentinel for a pointer
+/// does not merely put the payload in the wrong place: it puts it on top
+/// of the descriptor, and the image stops being a VMDK. The grain must be
+/// allocated instead, exactly as an entry of `0` would be.
+#[test]
+fn write_into_a_zeroed_grain_allocates_rather_than_overwriting_the_descriptor() {
+    let path = tmp_path("zg_write");
+    let pattern: Vec<u8> = (0u8..=255u8)
+        .cycle()
+        .take((GRAIN_SIZE * SECTOR) as usize)
+        .collect();
+    build_grain0_only(&path, &pattern);
+    patch(
+        &path,
+        offsets::FLAGS as u64,
+        &FLAG_ZEROED_GRAIN.to_le_bytes(),
+    );
+    patch(
+        &path,
+        GT_OFF_SECTOR * SECTOR + 4,
+        &GTE_ZEROED_GRAIN.to_le_bytes(),
+    );
+
+    // What the descriptor sector holds before the write.
+    let descriptor_before = read_sector(&path, DESC_OFF_SECTOR);
+    assert!(
+        descriptor_before.starts_with(b"# Disk DescriptorFile"),
+        "fixture precondition: sector 1 is the descriptor"
+    );
+
+    let payload = [0x5Au8; 4096];
+    let r = VmdkReader::open_rw(&path).unwrap();
+    r.write_at(GRAIN_SIZE * SECTOR, &payload).unwrap();
+    r.flush().unwrap();
+
+    let mut readback = [0u8; 4096];
+    r.read_at(GRAIN_SIZE * SECTOR, &mut readback).unwrap();
+    assert_eq!(readback, payload, "the write must be readable back");
+
+    // The rest of the grain still reads as zero: allocating over a
+    // zeroed-grain marker has to preserve what the marker promised.
+    let mut tail = [0xFFu8; 512];
+    r.read_at(GRAIN_SIZE * SECTOR + 4096, &mut tail).unwrap();
+    assert!(tail.iter().all(|&b| b == 0));
+    drop(r);
+
+    let descriptor_after = read_sector(&path, DESC_OFF_SECTOR);
+    assert_eq!(
+        descriptor_before, descriptor_after,
+        "the write landed on the embedded descriptor at sector 1"
+    );
+
+    // The grain-table entry must now name a real grain, past the metadata.
+    let entry = read_grain_sector_value(&path, GT_OFF_SECTOR as u32, 1);
+    assert!(
+        entry > GRAIN0_OFF_SECTOR as u32,
+        "the marker must be replaced by a freshly allocated grain, got {entry}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+fn read_sector(path: &std::path::Path, sector: u64) -> Vec<u8> {
+    let mut f = File::open(path).unwrap();
+    f.seek(SeekFrom::Start(sector * SECTOR)).unwrap();
+    let mut buf = vec![0u8; SECTOR as usize];
+    f.read_exact(&mut buf).unwrap();
+    buf
 }
 
 // ---------------------------------------------------------------------------

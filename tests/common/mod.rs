@@ -73,6 +73,25 @@ impl WriteAt for std::fs::File {
     }
 }
 
+/// Overwrite `bytes` at byte `offset` in an already-built fixture.
+///
+/// Fixture builders take the parameters a *valid* image varies over.
+/// The values that matter to a corruption or sentinel test are the ones
+/// no builder would ever be asked for — a header flag word, a raw
+/// grain-table entry — and threading each of those through a builder as
+/// another argument makes the builder worse at its main job. Patching
+/// the finished file says plainly which byte the test is about.
+pub fn patch(path: &Path, offset: u64, bytes: &[u8]) {
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("open fixture for patching");
+    f.write_all_at(bytes, offset).expect("patch fixture");
+    use std::io::Write;
+    f.flush().expect("flush patched fixture");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
