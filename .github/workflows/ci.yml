@@ -42,6 +42,43 @@ jobs:
         working-directory: rust-img-vmdk
         run: cargo clippy --locked --all-targets -- -D warnings
 
+  # THE PROFILE THAT SHIPS IS NOT THE PROFILE THE TESTS RUN IN.
+  #
+  # Debug turns an integer overflow into a panic; release lets it wrap.
+  # So a test guarding against a wrapping computation passes `cargo
+  # test` for the WRONG REASON -- the panic -- while the behaviour it
+  # guards against is still live in the built library. The test is green
+  # and the defect is shipped.
+  #
+  # That is not hypothetical in this family of crates. `am-partitions`
+  # had a GPT writer that committed a table it could not read back, and
+  # the two profiles gave two different panic locations: in debug the
+  # library's own overflow check fired, in release the write returned
+  # `Ok(())` and only the test caught it. This crate has the same shape
+  # of arithmetic -- grain tables, extent offsets, sector counts scaled
+  # by 512 -- and until now tested only the profile that hides it.
+  test-release:
+    name: test (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rust-img-vmdk
+      - uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          ref: v0.2.10
+          path: rust-fs-core
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-img-vmdk
+      - name: test --release
+        working-directory: rust-img-vmdk
+        run: cargo test --locked --release --all-targets
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
