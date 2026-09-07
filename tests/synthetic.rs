@@ -327,3 +327,102 @@ fn fs_core_blockread_size_matches_virtual() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// Descriptor-only files: flat and split layouts
+// ---------------------------------------------------------------------------
+
+/// The descriptor file of a flat or split VMDK, as the reference tools
+/// write it: a few hundred bytes of plain text, no sparse header, and
+/// the extents named as separate files.
+fn descriptor_file(create_type: &str, extent_line: &str) -> String {
+    format!(
+        "# Disk DescriptorFile\n\
+         version=1\n\
+         CID=fffffffe\n\
+         parentCID=ffffffff\n\
+         createType=\"{create_type}\"\n\
+         \n\
+         # Extent description\n\
+         {extent_line}\n\
+         \n\
+         # The Disk Data Base\n\
+         ddb.virtualHWVersion = \"4\"\n"
+    )
+}
+
+/// A flat or split VMDK has no `KDMV` magic and is shorter than a sparse
+/// header, so it used to fail as "not a VMDK" or "device shorter than
+/// 512 bytes" — before `createType`, which is sitting in plain text on
+/// line 5, was ever read.
+///
+/// Naming the create type is what tells a caller which conversion to
+/// run. "Not a VMDK" tells them nothing, and tells them something false.
+#[test]
+fn a_descriptor_only_file_is_refused_by_its_create_type() {
+    for (create_type, extent) in [
+        ("monolithicFlat", "RW 2048 FLAT \"disk-flat.vmdk\" 0"),
+        ("twoGbMaxExtentFlat", "RW 2048 FLAT \"disk-f001.vmdk\" 0"),
+        ("twoGbMaxExtentSparse", "RW 2048 SPARSE \"disk-s001.vmdk\""),
+        ("vmfs", "RW 2048 VMFS \"disk-flat.vmdk\""),
+    ] {
+        let path = tmp_path(create_type);
+        std::fs::write(&path, descriptor_file(create_type, extent)).unwrap();
+
+        match VmdkReader::open(&path) {
+            Err(vmdk::Error::Unsupported(msg)) => assert!(
+                msg.contains(create_type),
+                "the refusal must name the create type; for {create_type} it said {msg:?}"
+            ),
+            Err(other) => panic!("{create_type}: expected Unsupported, got {other}"),
+            Ok(_) => panic!("{create_type}: opened a layout this crate cannot read"),
+        }
+    }
+}
+
+/// A descriptor file that declares `monolithicSparse` is a sidecar
+/// pointing at an extent in another file — as out of reach as a flat
+/// one, and refused as such rather than opened.
+#[test]
+fn a_sidecar_descriptor_for_a_sparse_extent_is_unsupported() {
+    let path = tmp_path("sidecar_sparse");
+    std::fs::write(
+        &path,
+        descriptor_file("monolithicSparse", "RW 2048 SPARSE \"disk-s001.vmdk\""),
+    )
+    .unwrap();
+
+    match VmdkReader::open(&path) {
+        Err(vmdk::Error::Unsupported(msg)) => assert!(
+            msg.contains("separate file"),
+            "the refusal must say where the data is, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other}"),
+        Ok(_) => panic!("opened a descriptor with no extent beside it"),
+    }
+}
+
+/// Widening the door for descriptor files must not turn the probe into
+/// one that accepts anything. A short file that is not a descriptor, a
+/// text file with no `createType`, and an empty file are all still "not
+/// a VMDK".
+#[test]
+fn files_that_are_not_vmdks_still_say_so() {
+    for (name, bytes) in [
+        ("junk", vec![0x5Au8; 300]),
+        ("empty", Vec::new()),
+        (
+            "prose",
+            b"this is a text file, but not a disk descriptor\n".to_vec(),
+        ),
+        ("long_junk", vec![0xA5u8; 200 * 1024]),
+    ] {
+        let path = tmp_path(name);
+        std::fs::write(&path, &bytes).unwrap();
+        match VmdkReader::open(&path) {
+            Err(vmdk::Error::NotVmdk) => {}
+            Err(other) => panic!("{name}: expected NotVmdk, got {other}"),
+            Ok(_) => panic!("{name}: opened a file that is not a VMDK"),
+        }
+    }
+}

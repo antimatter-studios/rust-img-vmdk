@@ -26,7 +26,12 @@ suitable for FFI from C/C++/Go/Swift.
 - [ ] `vmfs` / `vmfsSparse` (ESXi-native; rarely seen outside ESXi)
 
 Variants other than `monolithicSparse` return a clear "unsupported"
-error rather than misreading the image. So does a snapshot delta or
+error rather than misreading the image. That includes the ones whose
+file is a descriptor rather than a sparse extent -- `monolithicFlat` and
+the `twoGbMaxExtent*` pair have no `KDMV` magic anywhere, and are
+recognised by parsing the descriptor text and naming the `createType`.
+Only a file that is neither a sparse extent nor a parseable descriptor
+is reported as not a VMDK. So does a snapshot delta or
 linked clone: it *is* `monolithicSparse`, but its descriptor names a
 parent (`parentFileNameHint` / `parentCID`) and the grains it does not
 own live in that parent, so reading it standalone would return zeros.

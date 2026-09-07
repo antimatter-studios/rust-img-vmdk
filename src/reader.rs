@@ -212,8 +212,25 @@ impl VmdkReader {
 
     fn open_inner(dev: Arc<dyn BlockDevice>, writable: bool) -> Result<Self> {
         let dev_size = dev.size_bytes();
-        if dev_size < HEADER_SIZE as u64 {
-            return Err(Error::Corrupt("device shorter than 512 bytes"));
+
+        // WHAT KIND OF FILE IS THIS AT ALL.
+        //
+        // A monolithicSparse image is a sparse extent: `KDMV` at byte 0,
+        // its descriptor embedded a sector in. A flat or split image is
+        // not — the file a user is handed is a few hundred bytes of
+        // plain text naming the extents that hold the data, with no
+        // magic anywhere in it.
+        //
+        // Committing to the sparse-header parse first meant those images
+        // failed on the magic, or on being shorter than a header, and
+        // came back as "not a VMDK" or "corrupt". Both are false, and
+        // false in the direction that hurts: a caller probing a file
+        // against several container readers takes them as permission to
+        // move on, and tells the user their VMDK is unrecognised. The
+        // create type is right there in the text, and naming it is what
+        // tells them which conversion to run.
+        if !looks_like_a_sparse_extent(&dev, dev_size)? {
+            return Err(describe_descriptor_file(&dev, dev_size));
         }
 
         // Sparse header at sector 0.
@@ -898,6 +915,64 @@ impl VmdkReader {
             cache.entries[gte_idx] = new_grain_sector;
         }
         Ok(())
+    }
+}
+
+/// The largest file this reader will consider reading whole as a
+/// descriptor.
+///
+/// A descriptor *file* is a few hundred bytes: a handful of key=value
+/// lines and one extent line per extent. The embedded descriptor of a
+/// sparse image is bounded by `descriptorSize`, twenty sectors in every
+/// image the reference tools write. 64 KiB is far above both and far
+/// below anything worth reading into memory on the strength of a guess.
+const MAX_DESCRIPTOR_FILE_BYTES: u64 = 64 * 1024;
+
+/// Whether this device begins with a sparse extent header.
+///
+/// Anything else is either a descriptor file or not a VMDK at all, and
+/// the two are told apart by trying to parse it.
+fn looks_like_a_sparse_extent(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Result<bool> {
+    if dev_size < HEADER_SIZE as u64 {
+        return Ok(false);
+    }
+    let mut magic = [0u8; 4];
+    dev.read_at(0, &mut magic).map_err(fs_core_to_vmdk_error)?;
+    Ok(u32::from_le_bytes(magic) == crate::header::MAGIC)
+}
+
+/// The verdict on a file that is not a sparse extent.
+///
+/// Returns [`Error::Unsupported`] naming the create type when the file
+/// parses as a descriptor, and [`Error::NotVmdk`] when it does not —
+/// which keeps "not a VMDK" meaning what it says. A descriptor that
+/// declares `monolithicSparse` reaches this function only as a sidecar
+/// pointing at a separate extent, which is a layout this crate does not
+/// follow either.
+fn describe_descriptor_file(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Error {
+    if dev_size == 0 || dev_size > MAX_DESCRIPTOR_FILE_BYTES {
+        return Error::NotVmdk;
+    }
+    let mut bytes = vec![0u8; dev_size as usize];
+    if dev.read_at(0, &mut bytes).is_err() {
+        return Error::NotVmdk;
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Error::NotVmdk;
+    };
+    match Descriptor::parse(text) {
+        Err(Error::Unsupported(msg)) => Error::Unsupported(msg),
+        // A descriptor that says `monolithicSparse` and is a file of its
+        // own describes an extent somewhere else, which is as far out of
+        // reach as a flat one.
+        Ok(_) => Error::Unsupported(
+            "monolithicSparse descriptor file — the sparse extent it names is a separate \
+             file, and this crate reads only an image with its descriptor embedded",
+        ),
+        // No `createType` at all, or anything else the descriptor parser
+        // refuses: this is not a VMDK descriptor, and saying so is the
+        // honest answer.
+        Err(_) => Error::NotVmdk,
     }
 }
 

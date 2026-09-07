@@ -9,6 +9,19 @@ never does.
 
 ### Fixed
 
+- **A flat or split VMDK is refused by its create type, not denied to be
+  a VMDK.** The file a user is handed for `monolithicFlat`,
+  `twoGbMaxExtentFlat` or `twoGbMaxExtentSparse` is a few hundred bytes
+  of descriptor text with no `KDMV` magic anywhere in it, so the
+  sparse-header parse failed first and reported "corrupt" or "not a
+  VMDK". Both are false, and false in the direction that leads a probing
+  caller to move on and tell the user their VMDK is unrecognised. `open`
+  now reads the head of the file first and, when it is a descriptor,
+  returns `Unsupported` naming the create type. Only a file that is
+  neither a sparse extent nor a parseable descriptor is `NotVmdk`.
+
+### Fixed
+
 - **Writes keep the redundant grain directory in step with the primary.**
   A sparse VMDK carries a second copy of the grain directory and of every
   grain table — `rgd_offset`, announced by bit 1 of `flags`, and present
