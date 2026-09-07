@@ -9,6 +9,15 @@ never does.
 
 ### Fixed
 
+- **A one-sector write no longer allocates whatever `num_gtes_per_gt`
+  asks for.** The read path bounds a grain table against the file before
+  loading it; the write path *creates* one, so nothing preceded it, and
+  it sized both the allocation and its zero-fill buffer straight from the
+  header field. With `num_gtes_per_gt` patched to `0x0100_0000`, a
+  512-byte write into a 69,120-byte image produced a 67,243,520-byte file
+  and a 64 MiB zero buffer. The field is now capped at parse time, which
+  covers both paths.
+
 - **A flat or split VMDK is refused by its create type, not denied to be
   a VMDK.** The file a user is handed for `monolithicFlat`,
   `twoGbMaxExtentFlat` or `twoGbMaxExtentSparse` is a few hundred bytes

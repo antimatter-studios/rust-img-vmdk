@@ -573,9 +573,11 @@ impl VmdkReader {
             // The grain directory is required to fit inside the file
             // where it is read, twenty lines from here. A grain table
             // is the same kind of thing -- a run of 4-byte entries at a
-            // sector the header names -- and `num_gtes_per_gt` is a u32
-            // checked only for being non-zero, so it can ask for 16 GiB
-            // from a file of a few kilobytes, once per cache miss.
+            // sector the header names. `num_gtes_per_gt` is capped at
+            // parse time (`header::MAX_GTES_PER_GT`), so the length is
+            // bounded before it gets here; this check is what stops a
+            // table that fits the cap but not the file it claims to
+            // live in.
             let off = (gt_sector as u64) * SECTOR_SIZE;
             let len = (entries_per_gt as u64)
                 .checked_mul(GD_GT_ENTRY_SIZE)
