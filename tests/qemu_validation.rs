@@ -121,6 +121,53 @@ fn qemu_check(path: &Path) {
     assert_qemu(&["check", path.to_str().unwrap()]);
 }
 
+/// A temp *directory* that removes itself on drop.
+///
+/// The single-file `TempPath` is not enough for the subformats that are
+/// more than one file: `monolithicFlat` writes a descriptor plus a
+/// `-flat.vmdk`, and the `twoGbMaxExtent*` pair write a descriptor plus
+/// numbered extents. Cleaning those up by name means knowing qemu's
+/// naming scheme; a directory does not.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let mut p = std::env::temp_dir();
+        p.push(format!("vmdk_qemu_{}_{n}_{name}", std::process::id()));
+        std::fs::create_dir_all(&p).expect("create fixture directory");
+        TempDir(p)
+    }
+
+    fn join(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Create an image in `subformat` and hand back the path qemu would
+/// expect a caller to open — the descriptor file.
+fn qemu_create_subformat(dir: &TempDir, subformat: &str, size: &str) -> PathBuf {
+    let path = dir.join(&format!("{subformat}.vmdk"));
+    assert_qemu(&[
+        "create",
+        "-f",
+        "vmdk",
+        "-o",
+        &format!("subformat={subformat}"),
+        path.to_str().unwrap(),
+        size,
+    ]);
+    path
+}
+
 fn qemu_convert_raw_to_vmdk(raw: &Path, vmdk: &Path) {
     assert_qemu(&[
         "convert",
@@ -204,6 +251,60 @@ fn qemu_check_passes_on_empty_qemu_image() {
     let p = vmdk_path("empty");
     qemu_create(&p, "4M");
     qemu_check(&p);
+}
+
+/// A flat or split VMDK is a descriptor *file*: a few hundred bytes of
+/// plain text naming the extents that hold the data. There is no `KDMV`
+/// magic anywhere in it, so the sparse-header parse fails first and the
+/// image is reported as not a VMDK at all.
+///
+/// That is false, and false in the direction that hurts. A caller
+/// probing a file against several container readers takes "not a VMDK"
+/// as permission to move on, and ends up telling the user their VMDK is
+/// unrecognised — for a file whose first line reads
+/// `# Disk DescriptorFile`. `Unsupported` naming the create type tells
+/// them which conversion to run instead.
+///
+/// None of these are exotic: `monolithicFlat` is what
+/// `qemu-img create -f vmdk` produces with no `-o subformat=`, and the
+/// `twoGbMaxExtent*` pair is what anything targeting older VMware or
+/// FAT32 media produces.
+#[test]
+fn a_flat_or_split_descriptor_names_its_create_type_rather_than_denying_it_is_a_vmdk() {
+    for subformat in [
+        "monolithicFlat",
+        "twoGbMaxExtentSparse",
+        "twoGbMaxExtentFlat",
+    ] {
+        let dir = TempDir::new(subformat);
+        let path = qemu_create_subformat(&dir, subformat, "8M");
+        // qemu reads the set it just wrote, so the fixture is sound.
+        assert_eq!(qemu_virtual_size(&path), 8 * 1024 * 1024);
+
+        match VmdkReader::open(&path) {
+            Err(vmdk::Error::Unsupported(msg)) => assert!(
+                msg.contains(subformat),
+                "the refusal must name the create type; for {subformat} it said {msg:?}"
+            ),
+            Err(other) => panic!("{subformat}: expected Unsupported, got {other}"),
+            Ok(_) => panic!("{subformat}: opened a layout this crate cannot read"),
+        }
+    }
+}
+
+/// A file that is neither a sparse extent nor a descriptor is still not
+/// a VMDK. Widening the door for descriptor files must not turn the
+/// probe into one that accepts anything.
+#[test]
+fn a_file_that_is_neither_a_sparse_extent_nor_a_descriptor_is_still_not_a_vmdk() {
+    let dir = TempDir::new("not-a-vmdk");
+    let path = dir.join("plain.bin");
+    std::fs::write(&path, vec![0x5Au8; 4096]).unwrap();
+    match VmdkReader::open(&path) {
+        Err(vmdk::Error::NotVmdk) => {}
+        Err(other) => panic!("expected NotVmdk, got {other}"),
+        Ok(_) => panic!("expected NotVmdk, got Ok"),
+    }
 }
 
 /// Cross-read (trivial): a blank qemu VMDK reads as zeros, and our
