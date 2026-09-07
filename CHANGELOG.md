@@ -9,6 +9,21 @@ never does.
 
 ### Fixed
 
+- **Concurrent writes no longer lose data while reporting success.**
+  Every structure had its own lock and none was held across the
+  test-then-allocate-then-publish sequence that allocation is, so two
+  threads writing into the same absent grain table — or the same sparse
+  grain — could both allocate, and the second could overwrite the
+  first's published pointer. Both calls returned `Ok(())`; one writer's
+  bytes were left in a grain nothing referenced, and the offset read
+  back as zeros. Allocation is now serialised as a whole, while a write
+  into a grain that already exists still runs unserialised.
+- **The grain-table cache is keyed by the table, not the slot.** It
+  recorded which directory *index* was cached, so an update meant for
+  one table could be applied to a different table's cached contents.
+
+### Fixed
+
 - **A zeroed grain reads as zeros, not as the descriptor.** A grain-table
   entry of `1` is the format's zeroed-grain marker — "present and entirely
   zero" — announced by bit 2 of the header's `flags`. That flags word was
