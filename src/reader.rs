@@ -34,6 +34,26 @@
 //! with `dev.flush()` between each step. A crash mid-allocation may leak
 //! a grain or grain table but never produces a wrong-data read.
 //!
+//! ## What a write records about itself
+//!
+//! Two pieces of per-image bookkeeping belong to the writer, and both
+//! are set before any data moves.
+//!
+//! The descriptor's `CID` is a *content* identifier: a child disk
+//! records its parent's value in `parentCID`, so that a child whose
+//! remembered value no longer matches can be recognised as stale. This
+//! crate refuses to open a child, but nothing stops it opening the
+//! **parent** of a chain, so it bumps the identifier on the first write
+//! of a session. Bumping it before the write rather than after is
+//! deliberate: a crash in between then leaves an identifier that moved
+//! and contents that did not, which makes a child refuse — the
+//! conservative answer — where the other order leaves changed contents
+//! under the identifier the child remembers.
+//!
+//! `uncleanShutdown` is raised before a write and lowered by a clean
+//! `flush`, so it stands over exactly the window in which a crash would
+//! leave the image half-written.
+//!
 //! ## The redundant copies
 //!
 //! A sparse extent carries a second grain directory at `rgd_offset` and
@@ -57,7 +77,7 @@
 
 use crate::descriptor::Descriptor;
 use crate::error::{Error, Result};
-use crate::header::{SparseHeader, GTE_ZEROED_GRAIN, HEADER_SIZE};
+use crate::header::{offsets, SparseHeader, GTE_ZEROED_GRAIN, HEADER_SIZE};
 use fs_core::{BlockDevice, FileDevice};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -125,6 +145,27 @@ pub struct VmdkReader {
     /// First byte a grain may legally occupy: everything below it is
     /// the image's own metadata. See [`VmdkReader::grain_host_offset`].
     first_grain_byte: u64,
+    /// Byte offset and length of the embedded descriptor region.
+    ///
+    /// Kept so the `CID=` line can be rewritten in place on the first
+    /// write of a session. It used to be read once, parsed, and dropped,
+    /// which is how the content identifier came to be immutable.
+    descriptor_extent: (u64, u64),
+    /// Whether this session has already bumped the descriptor's `CID`.
+    ///
+    /// Once per session, not once per write: the identifier says the
+    /// contents changed, and a value that changed a thousand times says
+    /// no more than one that changed once, at a thousand times the cost.
+    content_id_bumped: Mutex<bool>,
+    /// Whether the image's `uncleanShutdown` byte is currently raised.
+    ///
+    /// Unlike the `CID` this goes up and down: it is raised before a
+    /// write and lowered by a clean `flush`, so it stands exactly over
+    /// the window in which a crash would leave the image half-written.
+    /// Tracking it here rather than reading the byte back keeps the
+    /// common case — write, write, write, flush — to one raise and one
+    /// lower rather than one of each per write.
+    unclean_marked: Mutex<bool>,
 }
 
 /// What a grain-table entry says about its grain.
@@ -425,6 +466,9 @@ impl VmdkReader {
             alloc_cursor: Mutex::new(alloc_cursor),
             allocation: Mutex::new(()),
             first_grain_byte,
+            descriptor_extent: (desc_byte_off, desc_byte_len),
+            content_id_bumped: Mutex::new(false),
+            unclean_marked: Mutex::new(false),
         })
     }
 
@@ -660,6 +704,16 @@ impl VmdkReader {
             });
         }
 
+        // BEFORE ANY DATA MOVES, NOT AFTER.
+        //
+        // A crash between the stamp and the write leaves an image whose
+        // content identifier changed and whose contents did not: a
+        // snapshot child sees a mismatch and refuses, which is the
+        // conservative wrong answer. Stamping afterwards would leave the
+        // opposite -- changed contents under the identifier the child
+        // remembers -- which is the failure this exists to prevent.
+        self.mark_modified()?;
+
         let mut cursor = offset;
         let mut written: usize = 0;
 
@@ -759,6 +813,70 @@ impl VmdkReader {
         if !self.writable {
             return Ok(());
         }
+        self.dev_flush()?;
+        // A clean sync is the caller saying its writes are complete, so
+        // the unclean-shutdown marker comes down. A crash between a write
+        // and the next flush leaves it standing, which is exactly what it
+        // is for: the module doc already admits a crash mid-allocation
+        // may leak a grain, and without the marker such an image is
+        // byte-indistinguishable from one closed cleanly.
+        let mut marked = self.unclean_marked.lock().unwrap();
+        if *marked {
+            self.dev_write(offsets::UNCLEAN_SHUTDOWN as u64, &[0u8])?;
+            self.dev_flush()?;
+            *marked = false;
+        }
+        Ok(())
+    }
+
+    /// Record that the image is being modified: bump the descriptor's
+    /// content identifier if this session has not yet, and raise
+    /// `uncleanShutdown` if it is not already up.
+    ///
+    /// Raised on the first write rather than at open, so that opening an
+    /// image read-write and only reading from it does not modify the
+    /// file.
+    fn mark_modified(&self) -> Result<()> {
+        {
+            let mut bumped = self.content_id_bumped.lock().unwrap();
+            if !*bumped {
+                self.bump_content_id()?;
+                *bumped = true;
+            }
+        }
+        let mut marked = self.unclean_marked.lock().unwrap();
+        if !*marked {
+            self.dev_write(offsets::UNCLEAN_SHUTDOWN as u64, &[1u8])?;
+            self.dev_flush()?;
+            *marked = true;
+        }
+        Ok(())
+    }
+
+    /// Rewrite the descriptor's `CID=` line with a fresh value.
+    ///
+    /// A `CID` is eight hex digits, so the replacement is exactly as long
+    /// as the original and the rewrite is confined to those eight bytes:
+    /// nothing after the line moves, and the region keeps the length
+    /// `descriptorSize` declares.
+    ///
+    /// A descriptor with no `CID` line is left alone. Every image the
+    /// reference producers write has one, and inserting one would move
+    /// every byte after it — a much larger operation to perform on the
+    /// strength of a field being absent.
+    fn bump_content_id(&self) -> Result<()> {
+        let (off, len) = self.descriptor_extent;
+        let mut bytes = vec![0u8; len as usize];
+        self.dev_read(off, &mut bytes)?;
+        let Some(at) = find_content_id_digits(&bytes) else {
+            return Ok(());
+        };
+        let current = std::str::from_utf8(&bytes[at..at + CID_DIGITS])
+            .ok()
+            .and_then(|s| u32::from_str_radix(s, 16).ok())
+            .unwrap_or(0);
+        let next = next_content_id(current);
+        self.dev_write(off + at as u64, format!("{next:08x}").as_bytes())?;
         self.dev_flush()
     }
 
@@ -1022,6 +1140,49 @@ fn describe_descriptor_file(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Error 
         // honest answer.
         Err(_) => Error::NotVmdk,
     }
+}
+
+/// How many hex digits a descriptor's `CID` value has.
+const CID_DIGITS: usize = 8;
+
+/// Where the eight hex digits of the descriptor's `CID=` value begin, if
+/// the region has such a line.
+///
+/// Matched at the start of a line so that `parentCID=` — which is the
+/// *other* half of the pair and must not move — cannot be mistaken for
+/// it.
+fn find_content_id_digits(region: &[u8]) -> Option<usize> {
+    let mut at_line_start = true;
+    for i in 0..region.len() {
+        if at_line_start && region[i..].starts_with(b"CID=") && i + 4 + CID_DIGITS <= region.len() {
+            return Some(i + 4);
+        }
+        at_line_start = region[i] == b'\n' || region[i] == b'\r';
+    }
+    None
+}
+
+/// The next content identifier, given the current one.
+///
+/// It has to differ from the value it replaces — a `CID` that stayed the
+/// same is the whole defect — and it must not be `ffffffff`, which is
+/// the sentinel a `parentCID` uses for "no parent". Beyond that the
+/// format asks nothing of it: it is an identifier, not a counter, and
+/// nothing derives meaning from its ordering.
+///
+/// Mixing the clock with the old value rather than incrementing keeps
+/// two images that started from the same `CID` from staying in step, and
+/// avoids a dependency for the sake of eight hex digits.
+fn next_content_id(current: u32) -> u32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() ^ (d.as_secs() as u32))
+        .unwrap_or(0);
+    let mut next = current.wrapping_mul(1_664_525).wrapping_add(1_013_904_223) ^ nanos;
+    while next == current || next == 0xFFFF_FFFF || next == 0 {
+        next = next.wrapping_add(1);
+    }
+    next
 }
 
 /// Read one grain directory: `len` bytes of little-endian `u32` sector

@@ -549,8 +549,15 @@ fn write_into_a_zeroed_grain_allocates_rather_than_overwriting_the_descriptor() 
 
     let descriptor_after = read_sector(&path, DESC_OFF_SECTOR);
     assert_eq!(
-        descriptor_before, descriptor_after,
+        without_content_id(&descriptor_before),
+        without_content_id(&descriptor_after),
         "the write landed on the embedded descriptor at sector 1"
+    );
+    // The one part of the descriptor a write is *supposed* to change.
+    assert_ne!(
+        content_id(&descriptor_before),
+        content_id(&descriptor_after),
+        "a write must change the content identifier"
     );
 
     // The grain-table entry must now name a real grain, past the metadata.
@@ -561,6 +568,28 @@ fn write_into_a_zeroed_grain_allocates_rather_than_overwriting_the_descriptor() 
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// Where the eight hex digits of the descriptor's `CID=` value sit.
+fn content_id_at(region: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(region);
+    text.find("\nCID=")
+        .expect("the fixture descriptor has a CID")
+        + 5
+}
+
+fn content_id(region: &[u8]) -> Vec<u8> {
+    let at = content_id_at(region);
+    region[at..at + 8].to_vec()
+}
+
+/// The descriptor with its content identifier blanked, so two of them
+/// can be compared for everything a write must *not* change.
+fn without_content_id(region: &[u8]) -> Vec<u8> {
+    let mut out = region.to_vec();
+    let at = content_id_at(region);
+    out[at..at + 8].fill(b'-');
+    out
 }
 
 fn read_sector(path: &std::path::Path, sector: u64) -> Vec<u8> {
@@ -833,4 +862,75 @@ fn open_rw_on_device_refuses_readonly_inner() {
     assert!(matches!(err, Err(vmdk::Error::ReadOnly)));
 
     let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// 9. the unclean-shutdown marker
+// ---------------------------------------------------------------------------
+
+/// `uncleanShutdown` records that a writer had the image open and did
+/// not close it properly. It was parsed into the header struct and never
+/// set, never cleared, and never consulted — so an image this crate
+/// crashed halfway through was byte-indistinguishable from one it closed
+/// cleanly, and nothing downstream could even know to look. The module
+/// doc already admits a crash mid-allocation may leak a grain.
+///
+/// It is raised on the first write rather than at open, so that opening
+/// an image read-write and only reading from it does not modify the
+/// file, and lowered on a clean `flush`, which is the caller saying its
+/// writes are complete.
+#[test]
+fn the_unclean_shutdown_marker_stands_between_a_write_and_a_flush() {
+    let path = tmp_path("unclean");
+    let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+    assert_eq!(unclean_byte(&path), 0, "fixture precondition");
+
+    let r = VmdkReader::open_rw(&path).unwrap();
+    let mut probe = [0u8; 16];
+    r.read_at(0, &mut probe).unwrap();
+    assert_eq!(
+        unclean_byte(&path),
+        0,
+        "opening read-write and only reading must not modify the image"
+    );
+
+    r.write_at(0, &[0x11u8; 512]).unwrap();
+    assert_eq!(
+        unclean_byte(&path),
+        1,
+        "a write with no flush behind it must leave the marker standing"
+    );
+
+    r.flush().unwrap();
+    assert_eq!(
+        unclean_byte(&path),
+        0,
+        "a clean flush must lower the marker"
+    );
+
+    // And it goes back up for the next write.
+    r.write_at(1024, &[0x22u8; 512]).unwrap();
+    assert_eq!(unclean_byte(&path), 1);
+    r.flush().unwrap();
+    assert_eq!(unclean_byte(&path), 0);
+    drop(r);
+
+    // The image is still readable, and the header still parses.
+    let r = VmdkReader::open(&path).unwrap();
+    assert_eq!(r.header().unclean_shutdown, 0);
+    let mut got = [0u8; 512];
+    r.read_at(0, &mut got).unwrap();
+    assert_eq!(got, [0x11u8; 512]);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+fn unclean_byte(path: &std::path::Path) -> u8 {
+    let mut f = File::open(path).unwrap();
+    f.seek(SeekFrom::Start(offsets::UNCLEAN_SHUTDOWN as u64))
+        .unwrap();
+    let mut b = [0u8; 1];
+    f.read_exact(&mut b).unwrap();
+    b[0]
 }

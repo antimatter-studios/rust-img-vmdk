@@ -657,6 +657,85 @@ fn a_write_keeps_the_redundant_grain_directory_in_step() {
     assert_eq!(&out[AT as usize..AT as usize + payload.len()], &payload[..]);
 }
 
+/// Read the `CID=` value out of an image's embedded descriptor.
+fn descriptor_cid(path: &Path) -> String {
+    let image = std::fs::read(path).unwrap();
+    let desc_off = u64::from_le_bytes(image[28..36].try_into().unwrap()) as usize * 512;
+    let desc_len = u64::from_le_bytes(image[36..44].try_into().unwrap()) as usize * 512;
+    let text = String::from_utf8_lossy(&image[desc_off..desc_off + desc_len]);
+    text.lines()
+        .find_map(|l| {
+            l.trim()
+                .trim_end_matches('\0')
+                .strip_prefix("CID=")
+                .map(str::to_owned)
+        })
+        .expect("the descriptor must carry a CID")
+}
+
+/// Every VMware descriptor carries a `CID`, and a child disk records its
+/// parent's value in `parentCID`. It is a *content* identifier: it is
+/// meant to change whenever the disk's contents change, so a child whose
+/// `parentCID` no longer matches can be recognised as stale.
+///
+/// This crate refuses to open a child — a descriptor that names a parent
+/// is `Unsupported` — but nothing stops it opening the **parent** of a
+/// snapshot chain and writing to it. When that happened the CID stayed
+/// exactly as it was found, so the child's `parentCID` still matched, the
+/// chain was accepted as consistent, and the child's view of the disk
+/// became a mixture of its own grains and a parent that no longer agreed
+/// with them. That is precisely the failure the pair exists to catch.
+#[test]
+fn writing_to_an_image_changes_the_content_id_qemu_still_reads() {
+    let p = vmdk_path("cid");
+    qemu_create(&p, "8M");
+    let before = descriptor_cid(&p);
+
+    let r = VmdkReader::open_rw(&p).unwrap();
+    r.write_at(1024 * 1024, &[0x2Au8; 4096]).unwrap();
+    r.flush().unwrap();
+    drop(r);
+
+    let after = descriptor_cid(&p);
+    assert_ne!(
+        before, after,
+        "the content identifier did not change, so a snapshot child still \
+         believes its parent is the one it was taken from"
+    );
+    assert_eq!(after.len(), 8, "a CID is eight hex digits: {after:?}");
+    assert!(after.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // The descriptor must still be a descriptor afterwards.
+    assert_eq!(qemu_virtual_size(&p), 8 * 1024 * 1024);
+    qemu_check(&p);
+    let raw = raw_path("cid");
+    qemu_convert_vmdk_to_raw(&p, &raw);
+    let out = std::fs::read(&raw).unwrap();
+    assert_eq!(&out[1024 * 1024..1024 * 1024 + 4096], &[0x2Au8; 4096]);
+
+    // And reopening still works: the region is still valid UTF-8, still
+    // parses, and still says monolithicSparse.
+    VmdkReader::open(&p).expect("the rewritten descriptor must still parse");
+}
+
+/// An open that writes nothing must not change the content identifier.
+/// The CID says the contents changed; bumping it on every open would
+/// make a child stale for having been looked at.
+#[test]
+fn opening_an_image_without_writing_leaves_the_content_id_alone() {
+    let p = vmdk_path("cid-ro");
+    qemu_create(&p, "8M");
+    let before = descriptor_cid(&p);
+
+    let r = VmdkReader::open_rw(&p).unwrap();
+    let mut buf = [0u8; 512];
+    r.read_at(0, &mut buf).unwrap();
+    r.flush().unwrap();
+    drop(r);
+
+    assert_eq!(before, descriptor_cid(&p));
+}
+
 /// Cross-write (structural): our writer mutates a qemu-created VMDK,
 /// then qemu-img check validates the grain directory / grain tables.
 #[test]

@@ -9,6 +9,22 @@ never does.
 
 ### Fixed
 
+- **A write changes the image's content identifier.** Every VMware
+  descriptor carries a `CID` and a child disk records its parent's value
+  in `parentCID`, so a child whose remembered value no longer matches can
+  be recognised as stale. This crate refuses to open a child, and nothing
+  stopped it opening the **parent** of a chain and writing to it — after
+  which the two still agreed, the chain was accepted as consistent, and
+  the child's view of the disk became a mixture of its own grains and a
+  parent that no longer matched them. The identifier is now bumped once
+  per session, before any data moves.
+- **`uncleanShutdown` is set and cleared.** The byte was parsed and never
+  written, so an image this crate crashed halfway through was
+  byte-indistinguishable from one it closed cleanly. It is raised before
+  a write and lowered by a clean `flush`.
+
+### Fixed
+
 - **A split-sparse extent is unsupported, not corrupt.** Each extent of a
   split disk carries a sparse header whose descriptor region is reserved
   and left empty, because the descriptor lives in the sidecar `.vmdk`.
