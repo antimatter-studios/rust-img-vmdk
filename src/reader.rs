@@ -78,7 +78,7 @@
 use crate::descriptor::Descriptor;
 use crate::error::{Error, Result};
 use crate::header::{offsets, SparseHeader, GTE_ZEROED_GRAIN, HEADER_SIZE};
-use fs_core::{BlockDevice, FileDevice};
+use fs_core::{BlockDevice, BlockRead, FileDevice};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -95,10 +95,17 @@ pub const SECTOR_SIZE: u64 = 512;
 const GD_GT_ENTRY_SIZE: u64 = 4;
 
 pub struct VmdkReader {
-    /// Backing block device. All host-offset reads/writes go through here.
-    /// `Arc<dyn BlockDevice>` because `BlockDevice` is `Send + Sync` and
-    /// the reader may live behind an `Arc` itself (FFI handles).
-    dev: Arc<dyn BlockDevice>,
+    /// Backing device, as the read half. All host-offset reads go
+    /// through here.
+    ///
+    /// `BlockRead` rather than `BlockDevice` because nothing on the
+    /// read path needs the write half, and demanding it meant a caller
+    /// holding an `Arc<dyn BlockRead>` — which is what this family's
+    /// read-only path passes around — could not open an image without
+    /// wrapping it first. `CountingDevice`, `SliceReader` and
+    /// `OwnedSlice` are all `BlockRead`, and the first of those is the
+    /// instrument this family measures drivers with.
+    dev: Arc<dyn BlockRead>,
     header: SparseHeader,
     /// The descriptor this image carries, as parsed at open.
     ///
@@ -129,8 +136,16 @@ pub struct VmdkReader {
     gt_cache: Mutex<GtCache>,
     /// Virtual disk size in bytes (`capacity * 512`).
     virtual_size: u64,
-    /// True when the image was opened read-write.
-    writable: bool,
+    /// The same device again, present only when the image was opened
+    /// for writing.
+    ///
+    /// Kept as an `Option` rather than beside a `bool` so that "can
+    /// this be written" is a property of what the type holds: the write
+    /// path cannot reach a device at all without going through this
+    /// field, where before every write site had to remember to check a
+    /// flag first. `CachingDevice` in the shared crate has the same
+    /// shape for the same reason.
+    writable: Option<Arc<dyn BlockDevice>>,
     /// Allocation cursor in sectors — the next free sector at the tail
     /// of the backing device. Initialised to the ceil of the device's
     /// reported size at open time and bumped as grains/tables are
@@ -233,21 +248,27 @@ impl VmdkReader {
     /// [`fs_core::FileDevice`].
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let dev = FileDevice::open(path.as_ref()).map_err(fs_core_to_vmdk_error)?;
-        Self::open_inner(Arc::new(dev), false)
+        Self::open_inner(Arc::new(dev), None)
     }
 
     /// Open `path` read-write. Errors if the path isn't writable.
     pub fn open_rw<P: AsRef<Path>>(path: P) -> Result<Self> {
         let dev = FileDevice::open_rw(path.as_ref()).map_err(fs_core_to_vmdk_error)?;
-        Self::open_inner(Arc::new(dev), true)
+        let dev: Arc<dyn BlockDevice> = Arc::new(dev);
+        Self::open_inner(dev.clone(), Some(dev))
     }
 
-    /// Open read-only on top of an arbitrary [`BlockDevice`]. Used when
+    /// Open read-only on top of an arbitrary [`BlockRead`]. Used when
     /// the caller already holds a device handle (FSKit-supplied block
-    /// resource, slice adapter, etc.) and wants the VMDK layer to sit
-    /// on top of it.
-    pub fn open_on_device(dev: Arc<dyn BlockDevice>) -> Result<Self> {
-        Self::open_inner(dev, false)
+    /// resource, slice adapter, counting or caching wrapper, etc.) and
+    /// wants the VMDK layer to sit on top of it.
+    ///
+    /// Takes the read half only. It used to demand `BlockDevice`, so a
+    /// caller with an `Arc<dyn BlockRead>` had to wrap it in
+    /// `ReadOnlyDevice` first — friction on the path every read-only
+    /// consumer takes, in a crate whose primary use is read-only.
+    pub fn open_on_device(dev: Arc<dyn BlockRead>) -> Result<Self> {
+        Self::open_inner(dev, None)
     }
 
     /// Open read-write on top of an arbitrary [`BlockDevice`]. The
@@ -257,10 +278,10 @@ impl VmdkReader {
         if !dev.is_writable() {
             return Err(Error::ReadOnly);
         }
-        Self::open_inner(dev, true)
+        Self::open_inner(dev.clone(), Some(dev))
     }
 
-    fn open_inner(dev: Arc<dyn BlockDevice>, writable: bool) -> Result<Self> {
+    fn open_inner(dev: Arc<dyn BlockRead>, writable: Option<Arc<dyn BlockDevice>>) -> Result<Self> {
         let dev_size = dev.size_bytes();
 
         // WHAT KIND OF FILE IS THIS AT ALL.
@@ -405,7 +426,7 @@ impl VmdkReader {
                 });
             match rgd {
                 Ok(entries) => Some(Mutex::new(entries)),
-                Err(e) if writable => return Err(e),
+                Err(e) if writable.is_some() => return Err(e),
                 Err(_) => None,
             }
         };
@@ -505,7 +526,7 @@ impl VmdkReader {
 
     /// Whether the image was opened read-write.
     pub fn is_writable(&self) -> bool {
-        self.writable
+        self.writable.is_some()
     }
 
     // -- internal device adapters ------------------------------------------
@@ -515,11 +536,19 @@ impl VmdkReader {
     }
 
     fn dev_write(&self, off: u64, buf: &[u8]) -> Result<()> {
-        self.dev.write_at(off, buf).map_err(fs_core_to_vmdk_error)
+        self.writable
+            .as_ref()
+            .ok_or(Error::ReadOnly)?
+            .write_at(off, buf)
+            .map_err(fs_core_to_vmdk_error)
     }
 
     fn dev_flush(&self) -> Result<()> {
-        self.dev.flush().map_err(fs_core_to_vmdk_error)
+        self.writable
+            .as_ref()
+            .ok_or(Error::ReadOnly)?
+            .flush()
+            .map_err(fs_core_to_vmdk_error)
     }
 
     /// Read exactly `buf.len()` bytes starting at virtual `offset`.
@@ -705,7 +734,7 @@ impl VmdkReader {
     ///   grain data → grain-table entry → grain-directory entry (when
     ///   growing) → flush, with `dev.flush()` between each step.
     pub fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
-        if !self.writable {
+        if !self.is_writable() {
             return Err(Error::ReadOnly);
         }
         let len = buf.len() as u64;
@@ -829,7 +858,7 @@ impl VmdkReader {
 
     /// Flush writes to stable storage. No-op for read-only images.
     pub fn flush(&self) -> Result<()> {
-        if !self.writable {
+        if !self.is_writable() {
             return Ok(());
         }
         self.dev_flush()?;
@@ -1096,7 +1125,7 @@ const MAX_DESCRIPTOR_FILE_BYTES: u64 = 64 * 1024;
 ///
 /// Anything else is either a descriptor file or not a VMDK at all, and
 /// the two are told apart by trying to parse it.
-fn looks_like_a_sparse_extent(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Result<bool> {
+fn looks_like_a_sparse_extent(dev: &Arc<dyn BlockRead>, dev_size: u64) -> Result<bool> {
     if dev_size < HEADER_SIZE as u64 {
         return Ok(false);
     }
@@ -1183,7 +1212,7 @@ fn descriptor_agrees_with_header(desc: &Descriptor, header: &SparseHeader) -> Re
 /// named it — a corruption test asserts the two stay equal.
 const VMFS_SPARSE_UNSUPPORTED: &str = "vmfsSparse";
 
-fn head_magic(dev: &Arc<dyn BlockDevice>) -> Result<u32> {
+fn head_magic(dev: &Arc<dyn BlockRead>) -> Result<u32> {
     let mut magic = [0u8; 4];
     dev.read_at(0, &mut magic).map_err(fs_core_to_vmdk_error)?;
     Ok(u32::from_le_bytes(magic))
@@ -1197,7 +1226,7 @@ fn head_magic(dev: &Arc<dyn BlockDevice>) -> Result<u32> {
 /// declares `monolithicSparse` reaches this function only as a sidecar
 /// pointing at a separate extent, which is a layout this crate does not
 /// follow either.
-fn describe_descriptor_file(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Error {
+fn describe_descriptor_file(dev: &Arc<dyn BlockRead>, dev_size: u64) -> Error {
     if dev_size == 0 || dev_size > MAX_DESCRIPTOR_FILE_BYTES {
         return Error::NotVmdk;
     }
@@ -1269,7 +1298,7 @@ fn next_content_id(current: u32) -> u32 {
 
 /// Read one grain directory: `len` bytes of little-endian `u32` sector
 /// numbers at byte offset `off`.
-fn read_directory(dev: &Arc<dyn BlockDevice>, off: u64, len: usize) -> Result<Vec<u32>> {
+fn read_directory(dev: &Arc<dyn BlockRead>, off: u64, len: usize) -> Result<Vec<u32>> {
     let mut bytes = vec![0u8; len];
     dev.read_at(off, &mut bytes)
         .map_err(fs_core_to_vmdk_error)?;

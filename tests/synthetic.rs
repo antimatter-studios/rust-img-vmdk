@@ -18,6 +18,7 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
+use std::sync::Arc;
 
 use vmdk::header::{offsets, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC};
 use vmdk::VmdkReader;
@@ -424,5 +425,76 @@ fn files_that_are_not_vmdks_still_say_so() {
             Err(other) => panic!("{name}: expected NotVmdk, got {other}"),
             Ok(_) => panic!("{name}: opened a file that is not a VMDK"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What a read-only open asks of its device
+// ---------------------------------------------------------------------------
+
+/// A read-only open takes the read half, so the family's own
+/// instruments can back one.
+///
+/// `open_on_device` used to demand `BlockDevice` — the read-*write*
+/// trait — while nothing on the read path uses the write half. A caller
+/// holding an `Arc<dyn BlockRead>`, which is what this family's
+/// read-only path passes around, had to wrap it in `ReadOnlyDevice`
+/// first, and the signature gave no hint that was what it wanted.
+///
+/// `CountingDevice` is the concrete case and the reason this test
+/// counts rather than merely opening: it is `BlockRead` only, it is the
+/// instrument every driver in this family is measured with, and it
+/// could not be handed to this one. Compiling is most of the assertion
+/// — the count is what makes the test say the reads really went
+/// through the wrapper rather than around it.
+#[test]
+fn a_read_only_open_takes_a_read_only_device_and_can_be_counted() {
+    let path = tmp_path("counted");
+    build_vmdk(&path, true, &vec![0xC7u8; 65536]);
+
+    let file: Arc<dyn fs_core::BlockRead> =
+        Arc::new(fs_core::FileDevice::open(&path).expect("open the fixture"));
+    let counter = Arc::new(fs_core::CountingDevice::new(file));
+
+    // No ReadOnlyDevice in between: this is the point.
+    let r = VmdkReader::open_on_device(counter.clone() as Arc<dyn fs_core::BlockRead>)
+        .expect("a BlockRead is enough to read an image");
+    assert!(
+        !r.is_writable(),
+        "a read-only open reported itself writable"
+    );
+
+    counter.reset();
+    let mut buf = [0u8; 512];
+    r.read_at(0, &mut buf).expect("read the first sector");
+    assert_eq!(buf[..16], [0xC7; 16], "the grain did not come back");
+    assert!(
+        counter.reads() > 0,
+        "the read did not go through the counting device"
+    );
+    assert!(
+        counter.bytes() >= 512,
+        "counted {} bytes for a 512-byte read",
+        counter.bytes()
+    );
+}
+
+/// A device that cannot be written cannot be opened read-write.
+///
+/// The other half of the split: `writable` is now the presence of a
+/// write handle rather than a flag beside one, so this is the check
+/// that the two constructors still lead to different types of thing.
+#[test]
+fn a_read_only_open_refuses_to_write() {
+    let path = tmp_path("ro_refuses_write");
+    build_vmdk(&path, true, &vec![0xC7u8; 65536]);
+
+    let file: Arc<dyn fs_core::BlockRead> =
+        Arc::new(fs_core::FileDevice::open(&path).expect("open the fixture"));
+    let r = VmdkReader::open_on_device(file).expect("open read-only");
+    match r.write_at(0, &[0u8; 512]) {
+        Err(vmdk::Error::ReadOnly) => {}
+        Ok(()) => panic!("a read-only open accepted a write"),
+        Err(e) => panic!("a write to a read-only open gave {e:?}"),
     }
 }
