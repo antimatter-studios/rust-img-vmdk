@@ -67,10 +67,6 @@ tasks:
       - '{{.OUT}}/include/{{.LIBNAME}}.h'
 
     cmds:
-      # Idempotent, and it replaces the old script's "is the target installed"
-      # `rustup target list --installed | grep` dance: rustup answers "up to
-      # date" without touching the network when it is. It runs here rather
-      # than in the consumer because the triple is ours.
       # THE HEADER MUST NAME THE LIBRARY THIS TASK ACTUALLY BUILDS,
       # and it is checked FIRST so a mismatch costs no release build.
       #
@@ -88,6 +84,10 @@ tasks:
       # name from Cargo.toml's `[lib] name`, which is what actually
       # decides the artefact.
       - 'cargo test --locked --test header_names_the_built_library'
+      # Idempotent, and it replaces the old script's "is the target installed"
+      # `rustup target list --installed | grep` dance: rustup answers "up to
+      # date" without touching the network when it is. It runs here rather
+      # than in the consumer because the triple is ours.
       - 'rustup target add {{.TRIPLE}}'
       - 'cargo build --release --target {{.TRIPLE}}'
       - 'mkdir -p "{{.OUT}}/include"'
