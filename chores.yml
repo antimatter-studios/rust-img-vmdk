@@ -71,6 +71,23 @@ tasks:
       # `rustup target list --installed | grep` dance: rustup answers "up to
       # date" without touching the network when it is. It runs here rather
       # than in the consumer because the triple is ours.
+      # THE HEADER MUST NAME THE LIBRARY THIS TASK ACTUALLY BUILDS,
+      # and it is checked FIRST so a mismatch costs no release build.
+      #
+      # include/vmdk.h said `libam_img_vmdk.a` for as long as the file
+      # existed, and cargo has never produced that name -- `[lib] name`
+      # is vmdk, so the artefact is libvmdk.a, which is exactly what the
+      # `cp` below copies. A C consumer following the header got a
+      # linker error for a library nobody builds.
+      #
+      # THE CHECK IS THE TEST, not a copy of it in shell. An earlier
+      # version of this guard grepped the header and compared what it
+      # found against `lib{{.LIBNAME}}.a` -- derived from the same
+      # hand-maintained variable it was checking, so the drift it
+      # existed to catch passed silently. The test derives the expected
+      # name from Cargo.toml's `[lib] name`, which is what actually
+      # decides the artefact.
+      - 'cargo test --locked --test header_names_the_built_library'
       - 'rustup target add {{.TRIPLE}}'
       - 'cargo build --release --target {{.TRIPLE}}'
       - 'mkdir -p "{{.OUT}}/include"'
