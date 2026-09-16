@@ -9,6 +9,11 @@ never does.
 
 ### Fixed
 
+- **The redundant grain directory is live only when the header declares
+  it.** `FLAG_REDUNDANT_GRAIN_TABLE` was defined and never read, so a
+  residual `rgd_offset` in an image whose flags declare no redundant copy
+  refused `open_rw` when it pointed past EOF, and otherwise had writes
+  mirrored into it. Liveness now needs the flag and the offset.
 - **A text file naming a `createType` is not a VMDK.** A small file was
   reported as an unsupported VMDK on the strength of that one line, which
   tells a caller probing several formats to stop looking. A descriptor
@@ -83,6 +88,7 @@ never does.
 
 ### Added
 
+- `SparseHeader::has_redundant_grain_directory`.
 - `header::SUPPORTED_VERSIONS` and `header::MAGIC_VMFS_SPARSE`.
 
 ### Fixed

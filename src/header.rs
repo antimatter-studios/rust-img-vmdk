@@ -287,6 +287,19 @@ impl SparseHeader {
     pub fn uses_zeroed_grain_marker(&self) -> bool {
         self.flags & FLAG_ZEROED_GRAIN != 0
     }
+
+    /// Whether the image declares a live redundant grain directory:
+    /// `flags` carries [`FLAG_REDUNDANT_GRAIN_TABLE`] **and** `rgd_offset`
+    /// names one.
+    ///
+    /// Both, not either. The flag is the format's statement that the
+    /// directory exists; an offset left behind without it is residue, and
+    /// treating it as live mirrored writes into a structure the image
+    /// does not claim to have (#66). Every image qemu, VMware and this
+    /// crate's fixtures produce sets both.
+    pub fn has_redundant_grain_directory(&self) -> bool {
+        self.flags & FLAG_REDUNDANT_GRAIN_TABLE != 0 && self.rgd_offset != 0
+    }
 }
 
 fn read_u16(b: &[u8], off: usize) -> u16 {
@@ -430,6 +443,32 @@ mod tests {
         // Neighbouring bits must not be mistaken for it.
         h[offsets::FLAGS..offsets::FLAGS + 4].copy_from_slice(&0x3u32.to_le_bytes());
         assert!(!SparseHeader::parse(&h).unwrap().uses_zeroed_grain_marker());
+    }
+
+    /// Both the flag and an offset, not either (#66).
+    #[test]
+    fn a_redundant_directory_needs_the_flag_and_an_offset() {
+        let mut h = valid_header();
+        let with = |h: &mut [u8; HEADER_SIZE], flags: u32, rgd: u64| {
+            h[offsets::FLAGS..offsets::FLAGS + 4].copy_from_slice(&flags.to_le_bytes());
+            h[offsets::RGD_OFFSET..offsets::RGD_OFFSET + 8].copy_from_slice(&rgd.to_le_bytes());
+            SparseHeader::parse(h)
+                .unwrap()
+                .has_redundant_grain_directory()
+        };
+        assert!(with(&mut h, 0x3, 21), "qemu's flags with an offset");
+        assert!(
+            !with(&mut h, 0x1, 21),
+            "an offset without the flag is residue"
+        );
+        assert!(
+            !with(&mut h, 0x3, 0),
+            "the flag without an offset names nothing"
+        );
+        assert!(
+            !with(&mut h, 0x5, 21),
+            "the zeroed-grain bit is not this one"
+        );
     }
 
     #[test]

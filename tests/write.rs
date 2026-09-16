@@ -214,6 +214,66 @@ fn build_with_redundant_directory(path: &std::path::Path) {
         .unwrap();
 }
 
+/// `flags` bit 1 is the format's statement that a redundant grain
+/// directory exists. It was defined and never read: liveness was decided
+/// by `rgd_offset != 0` alone, so a residual offset in an image whose
+/// flags do not declare the directory was treated as live. See #66.
+///
+/// Refusing a writable open over a directory the image never declared
+/// is the first half.
+#[test]
+fn an_undeclared_redundant_directory_does_not_refuse_open_rw() {
+    let path = tmp_path("undeclared_rgd_past_eof");
+    build_with_redundant_directory(&path);
+    // Flags cleared: no redundant directory is declared. The offset left
+    // behind points past EOF.
+    patch(&path, 8, &0u32.to_le_bytes());
+    patch(&path, 48, &10_000u64.to_le_bytes());
+
+    VmdkReader::open(&path).expect("read-only open");
+    VmdkReader::open_rw(&path)
+        .expect("an image that declares no redundant directory must open for writing");
+}
+
+/// The second half: writes mirrored into a table the image does not
+/// claim to have.
+#[test]
+fn an_undeclared_redundant_directory_is_not_written_to() {
+    let path = tmp_path("undeclared_rgd_in_file");
+    build_with_redundant_directory(&path);
+    patch(&path, 8, &0u32.to_le_bytes());
+    let before = read_grain_table(&path, RGT_OFF_SECTOR as u32);
+
+    let r = VmdkReader::open_rw(&path).unwrap();
+    r.write_at(GRAIN_SIZE * SECTOR, &[0x77u8; 512]).unwrap();
+    r.flush().unwrap();
+    drop(r);
+
+    assert_ne!(
+        read_grain_sector_value(&path, RGD_GT_OFF_SECTOR as u32, 1),
+        0,
+        "the primary table must record the write"
+    );
+    let after = read_grain_table(&path, RGT_OFF_SECTOR as u32);
+    if let Some(i) = before.iter().zip(&after).position(|(a, b)| a != b) {
+        panic!(
+            "redundant table entry {i} went {} -> {} in an image whose flags declare no redundant directory",
+            before[i], after[i]
+        );
+    }
+    assert_eq!(
+        read_directory_entry(&path, RGD_OFF_SECTOR, 0),
+        RGT_OFF_SECTOR as u32,
+        "the undeclared redundant directory must be left as found"
+    );
+    let mut buf = [0u8; 512];
+    VmdkReader::open(&path)
+        .unwrap()
+        .read_at(GRAIN_SIZE * SECTOR, &mut buf)
+        .unwrap();
+    assert_eq!(buf, [0x77u8; 512]);
+}
+
 /// Read a whole grain table as sector numbers.
 fn read_grain_table(path: &std::path::Path, gt_sector: u32) -> Vec<u32> {
     let mut f = File::open(path).unwrap();

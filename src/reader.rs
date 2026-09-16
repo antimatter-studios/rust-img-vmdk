@@ -126,7 +126,8 @@ pub struct VmdkReader {
     /// allocating a new grain table.
     gd: Mutex<Vec<u32>>,
     /// Cached redundant grain directory, when the image declares one
-    /// (`rgd_offset != 0`). `None` for an image without a redundant
+    /// ([`SparseHeader::has_redundant_grain_directory`]: the flag and a
+    /// nonzero `rgd_offset`). `None` for an image without a redundant
     /// copy, and for a read-only open of an image whose redundant
     /// directory does not fit the file.
     ///
@@ -427,7 +428,7 @@ impl VmdkReader {
         // at the redundant tables — while a tool that falls back to them
         // reads a hole where the data is. Refusing the write is the only
         // answer that is visible to anyone.
-        let redundant_gd = if header.rgd_offset == 0 {
+        let redundant_gd = if !header.has_redundant_grain_directory() {
             None
         } else {
             let rgd = header
