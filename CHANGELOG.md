@@ -9,6 +9,13 @@ never does.
 
 ### Fixed
 
+- **A short `CID` is widened, not overwritten past its end.** `qemu-img`
+  writes the CID unpadded, so about one image in sixteen has fewer than
+  eight digits, and the first write glued `parentCID` (or worse) onto the
+  rewritten field. A one-to-eight-digit CID is now rewritten as eight
+  digits with the rest of the descriptor moved into its NUL padding; a
+  CID that cannot be rewritten exactly refuses `open_rw` with `Corrupt`
+  instead of being guessed at. Read-only opens are unaffected.
 - **An empty embedded descriptor no longer claims to be a split-disk
   extent.** An erased descriptor region is byte-identical to a split
   extent's, and a device has no filename to tell them apart, so the

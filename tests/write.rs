@@ -584,6 +584,147 @@ fn write_into_a_zeroed_grain_allocates_rather_than_overwriting_the_descriptor() 
     let _ = std::fs::remove_file(&path);
 }
 
+/// A descriptor sector whose `CID=` line carries `cid` verbatim.
+fn descriptor_sector_with_cid(cid: &str) -> [u8; SECTOR as usize] {
+    let text = format!(
+        "# Disk DescriptorFile\n\
+         version=1\n\
+         CID={cid}\n\
+         parentCID=ffffffff\n\
+         createType=\"monolithicSparse\"\n\
+         \n\
+         RW {CAPACITY_SECTORS} SPARSE \"synthetic.vmdk\"\n"
+    );
+    let mut s = [0u8; SECTOR as usize];
+    s[..text.len()].copy_from_slice(text.as_bytes());
+    s
+}
+
+/// The descriptor text up to its NUL padding.
+fn descriptor_text(path: &std::path::Path) -> String {
+    let region = read_sector(path, DESC_OFF_SECTOR);
+    let end = region.iter().position(|&b| b == 0).unwrap_or(region.len());
+    String::from_utf8(region[..end].to_vec()).expect("descriptor is UTF-8")
+}
+
+/// `qemu-img create` writes the CID as an unpadded `%x`, so about one
+/// image in sixteen has fewer than eight digits. The bump wrote eight
+/// bytes in place regardless, over the field's newline and into the
+/// next line: `CID=792f8d9` became `CID=435a7054parentCID=ffffffff`,
+/// silently destroying `parentCID`, and a short enough field ate into
+/// `createType`. See #67.
+///
+/// A short field is a valid CID. It must be widened to eight digits with
+/// every following line kept, byte for byte.
+#[test]
+fn a_short_content_id_is_widened_without_eating_the_next_line() {
+    for cid in ["792f8d9", "abc", "a"] {
+        let path = tmp_path(&format!("short_cid_{cid}"));
+        let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+        build_grain0_only(&path, &pattern);
+        patch(
+            &path,
+            DESC_OFF_SECTOR * SECTOR,
+            &descriptor_sector_with_cid(cid),
+        );
+        let before = descriptor_text(&path);
+
+        let r = VmdkReader::open_rw(&path).unwrap();
+        r.write_at(0, &[0x5Au8; 512]).unwrap();
+        r.flush().unwrap();
+        drop(r);
+
+        let after = descriptor_text(&path);
+        let cid_line = after
+            .lines()
+            .find_map(|l| l.strip_prefix("CID="))
+            .unwrap_or_else(|| panic!("CID={cid}: no CID line left in {after:?}"));
+        assert!(
+            cid_line.len() == 8 && cid_line.chars().all(|c| c.is_ascii_hexdigit()),
+            "CID={cid}: the rewritten CID must be eight hex digits on its own line, got {cid_line:?}"
+        );
+        assert_ne!(
+            cid_line, cid,
+            "CID={cid}: the content identifier did not change"
+        );
+        let rest = |t: &str| -> Vec<String> {
+            t.lines()
+                .filter(|l| !l.starts_with("CID="))
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(
+            rest(&before),
+            rest(&after),
+            "CID={cid}: every other descriptor line must survive the rewrite"
+        );
+        VmdkReader::open(&path).expect("the rewritten descriptor must still open");
+    }
+}
+
+/// A `CID=` line that is not one to eight hex digits cannot be rewritten
+/// without guessing where the field ends, and a guess is what destroyed
+/// the neighbouring lines. A writable open refuses it — before a caller
+/// has committed to a write — and leaves the file untouched. A read-only
+/// open does not care about the CID and still succeeds.
+#[test]
+fn a_malformed_content_id_refuses_a_writable_open() {
+    for cid in ["xyz", "123456789", "", "12 34"] {
+        let path = tmp_path(&format!("bad_cid_{}", cid.len()));
+        let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+        build_grain0_only(&path, &pattern);
+        patch(
+            &path,
+            DESC_OFF_SECTOR * SECTOR,
+            &descriptor_sector_with_cid(cid),
+        );
+        let before = std::fs::read(&path).unwrap();
+
+        match VmdkReader::open_rw(&path) {
+            Err(vmdk::Error::Corrupt(msg)) => assert!(
+                msg.contains("CID"),
+                "CID={cid:?}: the refusal must name the field, got {msg:?}"
+            ),
+            Err(other) => panic!("CID={cid:?}: expected Corrupt, got {other}"),
+            Ok(_) => {
+                panic!("CID={cid:?}: opened for writing an image whose CID cannot be rewritten")
+            }
+        }
+        assert_eq!(
+            before,
+            std::fs::read(&path).unwrap(),
+            "CID={cid:?}: the file changed"
+        );
+        VmdkReader::open(&path).expect("a read-only open does not need the CID");
+    }
+}
+
+/// A short CID in a descriptor region with no NUL padding left has no
+/// room to widen into. Refused, rather than dropping the region's last
+/// bytes.
+#[test]
+fn a_short_content_id_with_no_room_to_widen_refuses_a_writable_open() {
+    let path = tmp_path("short_cid_full_region");
+    let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+    let mut sector = descriptor_sector_with_cid("abc");
+    let used = sector.iter().position(|&b| b == 0).unwrap();
+    // Fill the padding with a comment line, so the region has no NULs.
+    sector[used] = b'#';
+    for b in &mut sector[used + 1..SECTOR as usize - 1] {
+        *b = b'-';
+    }
+    sector[SECTOR as usize - 1] = b'\n';
+    patch(&path, DESC_OFF_SECTOR * SECTOR, &sector);
+    let before = std::fs::read(&path).unwrap();
+
+    assert!(
+        matches!(VmdkReader::open_rw(&path), Err(vmdk::Error::Corrupt(_))),
+        "a short CID with no room to widen must refuse the writable open"
+    );
+    assert_eq!(before, std::fs::read(&path).unwrap(), "the file changed");
+}
+
 /// Where the eight hex digits of the descriptor's `CID=` value sit.
 fn content_id_at(region: &[u8]) -> usize {
     let text = String::from_utf8_lossy(region);
