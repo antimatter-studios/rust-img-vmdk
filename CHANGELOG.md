@@ -9,6 +9,18 @@ never does.
 
 ### Fixed
 
+- **Grain pointers are checked against every metadata region, not a
+  floor.** The guard was one scalar floor: grain tables above it could be
+  read as guest data and overwritten by a write, and an `rgd_offset`
+  after the grains lifted it over every grain. The floor is now
+  `over_head`, and a grain must not overlap the header, descriptor,
+  directories or any grain table a live directory names (including ones
+  allocated this session).
+- **Grain-table pointers are checked against the metadata before a
+  write publishes into them.** A redundant directory entry was used with
+  no bound at all, and a primary one only against end-of-file, so an
+  entry naming the descriptor or a directory had a grain-table entry
+  written over it by an ordinary write.
 - **`flush` waits for writes in flight before lowering `uncleanShutdown`.**
   It took only the marker's own lock, so a flush concurrent with a write
   lowered the marker while the write was still running, and a crash then

@@ -171,9 +171,24 @@ pub struct VmdkReader {
     /// names a sector never changes afterwards, because grains are never
     /// relocated.
     allocation: Mutex<()>,
-    /// First byte a grain may legally occupy: everything below it is
-    /// the image's own metadata. See [`VmdkReader::grain_host_offset`].
+    /// First byte a grain may legally occupy: `over_head`, the format's
+    /// own statement of how much metadata precedes the grains. See
+    /// [`VmdkReader::grain_host_offset`].
     first_grain_byte: u64,
+    /// The metadata whose position the header states: the sparse header,
+    /// the descriptor, the grain directory and — when one is live — the
+    /// redundant directory. No grain may overlap it, and no grain table
+    /// may either.
+    fixed_metadata: Extents,
+    /// Every grain table a live directory names, primary and redundant,
+    /// plus every table this session allocates.
+    ///
+    /// A scalar floor cannot describe these: qemu puts them under
+    /// `over_head`, but this crate allocates them at the tail, above
+    /// the grains (#63). An `RwLock` rather than behind `allocation`,
+    /// because the read path and the write-through fast path consult it
+    /// without taking `allocation`.
+    grain_tables: RwLock<Extents>,
     /// Byte offset and length of the embedded descriptor region.
     ///
     /// Kept so the `CID=` line can be rewritten in place on the first
@@ -207,6 +222,36 @@ pub struct VmdkReader {
     /// on both paths. Holding `unclean_marked` across the write instead
     /// would self-deadlock in `mark_modified`.
     writes_in_flight: RwLock<()>,
+}
+
+/// A set of byte ranges, kept sorted and merged so an overlap query is a
+/// binary search: a grain directory can name tens of thousands of
+/// tables, and the read path asks once per grain.
+#[derive(Debug, Default)]
+struct Extents(Vec<(u64, u64)>);
+
+impl Extents {
+    /// Add `[start, end)`, merging it with anything it touches.
+    fn insert(&mut self, start: u64, end: u64) {
+        if start >= end {
+            return;
+        }
+        let i = self.0.partition_point(|&(_, e)| e < start);
+        let mut j = i;
+        let (mut s, mut e) = (start, end);
+        while j < self.0.len() && self.0[j].0 <= e {
+            s = s.min(self.0[j].0);
+            e = e.max(self.0[j].1);
+            j += 1;
+        }
+        self.0.splice(i..j, [(s, e)]);
+    }
+
+    /// Whether `[start, end)` shares a byte with the set.
+    fn overlaps(&self, start: u64, end: u64) -> bool {
+        let i = self.0.partition_point(|&(_, e)| e <= start);
+        self.0.get(i).is_some_and(|&(s, _)| s < end)
+    }
 }
 
 /// What a grain-table entry says about its grain.
@@ -494,26 +539,46 @@ impl VmdkReader {
             let end = start.checked_add(len)?;
             (end <= dev_sectors).then_some(end)
         };
-        let mut first_grain_sector = 1; // sector 0 is the sparse header
-        for end in [
-            fits(header.descriptor_offset, header.descriptor_size),
-            fits(header.gd_offset, gd_sectors),
-            (header.rgd_offset != 0)
-                .then(|| fits(header.rgd_offset, gd_sectors))
-                .flatten(),
-            // `over_head` is the format's own statement of how many
-            // sectors of metadata precede the grains. It is the only one
-            // of these that also covers the grain *tables*, whose
-            // positions are otherwise only discoverable one directory
-            // entry at a time.
-            fits(header.over_head, 0),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            first_grain_sector = first_grain_sector.max(end);
-        }
+        //
+        // BUT A SCALAR FLOOR CANNOT DESCRIBE THE LAYOUT (#63). Folding the
+        // directories into it let an `rgd_offset` after the grains lift
+        // the floor over every grain, and grain tables were not in it at
+        // all, so a grain pointer naming one read the table back as data.
+        // So the floor is `over_head` alone, and every other region is an
+        // extent a grain must not overlap: the fixed metadata below, and
+        // every grain table a live directory names.
+        let first_grain_sector = fits(header.over_head, 0).unwrap_or(0).max(1);
         let first_grain_byte = first_grain_sector * SECTOR_SIZE;
+
+        let mut fixed_metadata = Extents::default();
+        fixed_metadata.insert(0, SECTOR_SIZE);
+        let mut add_fixed = |start_sector: u64, sectors: u64| {
+            if let Some(end) = fits(start_sector, sectors) {
+                fixed_metadata.insert(start_sector * SECTOR_SIZE, end * SECTOR_SIZE);
+            }
+        };
+        add_fixed(header.descriptor_offset, header.descriptor_size);
+        add_fixed(header.gd_offset, gd_sectors);
+        if redundant_gd.is_some() {
+            add_fixed(header.rgd_offset, gd_sectors);
+        }
+
+        let gt_bytes = (header.num_gtes_per_gt as u64) * GD_GT_ENTRY_SIZE;
+        let mut grain_tables = Extents::default();
+        let rgd_entries = redundant_gd.as_ref().map(|m| m.lock().unwrap().clone());
+        for &sector in gd.iter().chain(rgd_entries.iter().flatten()) {
+            if sector == 0 {
+                continue;
+            }
+            let start = (sector as u64) * SECTOR_SIZE;
+            let end = start + gt_bytes;
+            // A table that runs past the file or overlaps the fixed
+            // metadata is refused when it is used; it is not a region to
+            // protect.
+            if end <= dev_size && !fixed_metadata.overlaps(start, end) {
+                grain_tables.insert(start, end);
+            }
+        }
 
         Ok(Self {
             dev,
@@ -530,6 +595,8 @@ impl VmdkReader {
             alloc_cursor: Mutex::new(alloc_cursor),
             allocation: Mutex::new(()),
             first_grain_byte,
+            fixed_metadata,
+            grain_tables: RwLock::new(grain_tables),
             descriptor_extent: (desc_byte_off, desc_byte_len),
             content_id_bumped: Mutex::new(false),
             unclean_marked: Mutex::new(false),
@@ -698,6 +765,13 @@ impl VmdkReader {
         let end = off
             .checked_add(len)
             .ok_or(Error::Corrupt("grain extent overflows"))?;
+        if self.fixed_metadata.overlaps(off, end)
+            || self.grain_tables.read().unwrap().overlaps(off, end)
+        {
+            return Err(Error::Corrupt(
+                "grain pointer lands inside the image's metadata",
+            ));
+        }
         if end > self.file_extent() {
             return Err(Error::Corrupt("grain extends past EOF"));
         }
@@ -739,6 +813,13 @@ impl VmdkReader {
                 .ok_or(Error::Corrupt("grain table extends past EOF"))?;
             if end > self.file_extent() {
                 return Err(Error::Corrupt("grain table extends past EOF"));
+            }
+            // Past EOF is not the only way a table pointer is wrong. One
+            // naming the descriptor or a directory passes that bound, and
+            // a write allocating a grain in it publishes the entry over
+            // that metadata (#64).
+            if self.fixed_metadata.overlaps(off, end) {
+                return Err(Error::Corrupt("grain table overlaps the image's metadata"));
             }
             let mut bytes = vec![0u8; len as usize];
             self.dev_read(off, &mut bytes)?;
@@ -879,6 +960,10 @@ impl VmdkReader {
         // The zeroed-grain marker takes this branch because it is not a
         // sector number — following it would write the payload over the
         // embedded descriptor.
+        // Resolve (and check) the redundant table before a grain is
+        // allocated, so a bad redundant pointer fails the write without
+        // leaking a grain.
+        self.redundant_gt_sector(addr.gt_idx, gt_sector)?;
         let grain_bytes = self.grain_size_bytes();
         let new_grain_sector = self.allocate_grain()?;
         if addr.in_grain != 0 || (addr.chunk_len as u64) < grain_bytes {
@@ -1034,6 +1119,11 @@ impl VmdkReader {
         if sector > u32::MAX as u64 {
             return Err(Error::Unsupported("grain table sector past u32 range"));
         }
+        // Protected before anything can name it.
+        self.grain_tables
+            .write()
+            .unwrap()
+            .insert(sector * SECTOR_SIZE, (sector + gt_sectors) * SECTOR_SIZE);
         let zeros = vec![0u8; (gt_sectors * SECTOR_SIZE) as usize];
         self.dev_write(sector * SECTOR_SIZE, &zeros)?;
         self.dev_flush()?;
@@ -1114,6 +1204,19 @@ impl VmdkReader {
                 .ok_or(Error::Corrupt("gt_idx past redundant grain directory"))?
         };
         if existing != 0 {
+            // Written to without any check, so an entry naming sector 1
+            // put four bytes of a sector number over the descriptor
+            // (#64). The same two bounds the primary table gets.
+            let off = (existing as u64) * SECTOR_SIZE;
+            let end = off + self.grain_table_sectors() * SECTOR_SIZE;
+            if end > self.file_extent() {
+                return Err(Error::Corrupt("redundant grain table extends past EOF"));
+            }
+            if self.fixed_metadata.overlaps(off, end) {
+                return Err(Error::Corrupt(
+                    "redundant grain table overlaps the image's metadata",
+                ));
+            }
             return Ok(Some(existing));
         }
 
@@ -1494,5 +1597,29 @@ fn fs_core_to_vmdk_error(e: fs_core::Error) -> Error {
             Error::OutOfBounds { offset, len, size }
         }
         fs_core::Error::Custom(s) => Error::Io(std::io::Error::other(s)),
+    }
+}
+
+#[cfg(test)]
+mod extents_tests {
+    use super::Extents;
+
+    #[test]
+    fn inserts_merge_and_overlap_is_half_open() {
+        let mut x = Extents::default();
+        x.insert(100, 200);
+        x.insert(300, 400);
+        x.insert(150, 310); // bridges both
+        x.insert(500, 600);
+        x.insert(600, 700); // touches: merged
+        assert_eq!(x.0, vec![(100, 400), (500, 700)]);
+
+        assert!(!x.overlaps(0, 100), "end is exclusive");
+        assert!(x.overlaps(0, 101));
+        assert!(!x.overlaps(400, 500), "the gap between two extents");
+        assert!(x.overlaps(399, 400));
+        assert!(x.overlaps(650, 651));
+        assert!(!x.overlaps(700, 800));
+        assert!(x.overlaps(0, 10_000), "a range covering everything");
     }
 }

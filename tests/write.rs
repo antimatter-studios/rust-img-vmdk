@@ -785,6 +785,59 @@ fn without_content_id(region: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A redundant grain-directory entry was written through unchecked, so
+/// one naming sector 1 — the descriptor — had four bytes of a sector
+/// number written over the descriptor by an ordinary guest write, and
+/// the image stopped opening. See #64.
+#[test]
+fn a_redundant_directory_entry_naming_the_descriptor_is_refused() {
+    let path = tmp_path("rgd_into_descriptor");
+    build_with_redundant_directory(&path);
+    patch(&path, RGD_OFF_SECTOR * SECTOR, &1u32.to_le_bytes());
+
+    let result = VmdkReader::open_rw(&path).and_then(|r| r.write_at(0, &[0x33u8; 512]));
+    let err = result.expect_err("a write that would publish into the descriptor must fail");
+    assert!(format!("{err}").contains("metadata"), "got {err}");
+    let descriptor = read_sector(&path, DESC_OFF_SECTOR);
+    assert!(
+        descriptor.starts_with(b"# Disk DescriptorFile\n"),
+        "the descriptor was overwritten: {:?}",
+        String::from_utf8_lossy(&descriptor[..24])
+    );
+    VmdkReader::open(&path).expect("the image must still open");
+}
+
+/// The sibling hole on the primary path: a grain-directory entry naming
+/// metadata passed the end-of-file bound, and a write allocating a grain
+/// in that "table" wrote its entry into whatever the table overlapped.
+/// Here the entry names the grain directory's own sector. See #64.
+#[test]
+fn a_primary_directory_entry_naming_metadata_is_refused() {
+    let path = tmp_path("gd_into_gd");
+    let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+    patch(
+        &path,
+        GD_OFF_SECTOR * SECTOR,
+        &(GD_OFF_SECTOR as u32).to_le_bytes(),
+    );
+    let before = read_sector(&path, GD_OFF_SECTOR);
+
+    // Entry 1 of that "table" is byte 4 of the directory sector: zero,
+    // so grain 1 looks sparse and a write allocates it.
+    let r = VmdkReader::open_rw(&path).unwrap();
+    let err = r
+        .write_at(GRAIN_SIZE * SECTOR, &[0x44u8; 512])
+        .expect_err("a table that overlaps the grain directory must not be written into");
+    assert!(format!("{err}").contains("metadata"), "got {err}");
+    drop(r);
+    assert_eq!(
+        read_sector(&path, GD_OFF_SECTOR),
+        before,
+        "the grain directory was overwritten through a bogus table"
+    );
+}
+
 fn read_sector(path: &std::path::Path, sector: u64) -> Vec<u8> {
     let mut f = File::open(path).unwrap();
     f.seek(SeekFrom::Start(sector * SECTOR)).unwrap();
