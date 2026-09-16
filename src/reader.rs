@@ -109,12 +109,16 @@ pub struct VmdkReader {
     header: SparseHeader,
     /// The descriptor this image carries, as parsed at open.
     ///
-    /// Held rather than dropped. It is the only place the create type,
-    /// the extent list and the parent CID are written down, and the
-    /// checks in [`descriptor_agrees_with_header`] are checks *of* it;
-    /// dropping it left the parse as nothing but a way of failing on a
-    /// malformed descriptor, and left a caller wanting any of those
-    /// three fields to re-read and re-parse the region itself.
+    /// Held rather than dropped. It is the only place the create type and
+    /// the extent list are written down, and the checks in
+    /// [`descriptor_agrees_with_header`] are checks *of* it; dropping it
+    /// left the parse as nothing but a way of failing on a malformed
+    /// descriptor, and left a caller wanting either field to re-read and
+    /// re-parse the region itself.
+    ///
+    /// The parent linkage (`parentCID`, `parentFileNameHint`) is **not**
+    /// retained: [`Descriptor::parse`] reads it only to refuse an image
+    /// that declares a parent, so every descriptor held here has none.
     descriptor: Descriptor,
     /// Cached primary grain directory (one u32 per grain table). Always
     /// small — `ceil(capacity / (grain_size * num_gtes_per_gt))` entries.
@@ -510,8 +514,10 @@ impl VmdkReader {
 
     /// The descriptor this image carries.
     ///
-    /// Its create type, extent list and parent CID are the image's own
-    /// account of what it is, which is worth having beside the header's.
+    /// Its create type and extent list are the image's own account of
+    /// what it is, which is worth having beside the header's. It carries
+    /// no parent linkage: an image declaring a parent is refused at open,
+    /// so there is none to report.
     pub fn descriptor(&self) -> &Descriptor {
         &self.descriptor
     }
