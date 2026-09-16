@@ -106,49 +106,58 @@ mod tests {
     /// because attention is on the failure.
     #[test]
     fn a_panicking_test_still_removes_its_fixture() {
+        let left = panicking_probe_left_behind();
+        assert!(
+            left.is_none(),
+            "a panicking test left its fixture behind: {left:?}"
+        );
+    }
+
+    /// Make a fixture inside a closure that panics, and report whether
+    /// **that exact file** outlived it.
+    ///
+    /// Exact, not a scan of the temp directory for the prefix. Several
+    /// test binaries compile this module and share one temp directory,
+    /// and a crashed run leaves its probe behind; a prefix scan failed
+    /// every later run on that corpse (#46). Narrowing the scan to this
+    /// pid is not enough either — pids are reused and the per-process
+    /// counter restarts at zero, so a stale probe can carry this very
+    /// name prefix. Only the path this call created answers the question.
+    fn panicking_probe_left_behind() -> Option<PathBuf> {
+        let created = std::sync::Mutex::new(None);
         let outcome = std::panic::catch_unwind(|| {
             let p = TempPath::new("drop_probe");
+            *created.lock().unwrap() = Some(p.0.clone());
             std::fs::write(&p.0, b"x").expect("write fixture");
             assert!(p.0.exists(), "the fixture was created");
             panic!("deliberate");
         });
         assert!(outcome.is_err(), "the closure must have panicked");
-
-        let strays = drop_probe_strays();
-        assert!(
-            strays.is_empty(),
-            "a panicking test left fixtures behind: {strays:?}"
-        );
+        let path = created
+            .into_inner()
+            .unwrap()
+            .expect("the closure recorded its fixture");
+        path.exists().then_some(path)
     }
 
-    /// Probe files in the temp directory that belong to THIS process.
-    fn drop_probe_strays() -> Vec<String> {
-        std::fs::read_dir(std::env::temp_dir())
-            .expect("read temp dir")
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with(&format!("vmdk_drop_probe_{}_", std::process::id())))
-            .collect()
-    }
-
-    /// Another process's probe is not this test's stray.
-    ///
-    /// `mod common` compiles into several test binaries, so the drop
-    /// test runs in several processes sharing one temp directory; and
-    /// one that genuinely crashed leaves its probe behind. Matching on
-    /// the prefix alone failed every later run of every binary on that
-    /// corpse until someone cleared the directory by hand — the pid
-    /// `TempPath::new` puts in the name exists to prevent that. See #46.
+    /// Corpses in the temp directory — another process's, and one that
+    /// carries this process's pid as a reused pid would — are not this
+    /// test's fixture, and must not fail it.
     #[test]
-    fn a_probe_left_by_another_process_is_not_counted() {
-        // pid 0 is never a test process, so this stands for a corpse.
-        let foreign = TempPath(std::env::temp_dir().join("vmdk_drop_probe_0_0.vmdk"));
-        std::fs::write(&foreign.0, b"x").expect("plant a foreign probe");
+    fn probes_left_by_other_runs_do_not_fail_the_drop_test() {
+        let dir = std::env::temp_dir();
+        let _foreign = TempPath(dir.join("vmdk_drop_probe_0_0.vmdk"));
+        let _reused_pid = TempPath(dir.join(format!(
+            "vmdk_drop_probe_{}_4000000000.vmdk",
+            std::process::id()
+        )));
+        std::fs::write(&_foreign.0, b"x").expect("plant a foreign probe");
+        std::fs::write(&_reused_pid.0, b"x").expect("plant a same-pid probe");
 
-        let strays = drop_probe_strays();
+        let left = panicking_probe_left_behind();
         assert!(
-            !strays.iter().any(|n| n == "vmdk_drop_probe_0_0.vmdk"),
-            "another process's probe was counted as this one's stray: {strays:?}"
+            left.is_none(),
+            "a corpse from another run was counted as this test's fixture: {left:?}"
         );
     }
 }
