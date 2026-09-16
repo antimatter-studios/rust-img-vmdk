@@ -807,6 +807,24 @@ fn a_redundant_directory_entry_naming_the_descriptor_is_refused() {
     VmdkReader::open(&path).expect("the image must still open");
 }
 
+/// Two directory entries naming one table make a write through either
+/// index change the other's mapping. Here the redundant directory names
+/// the primary's own table, so mirroring an entry writes it twice into
+/// one table, and a table meant to lead the primary no longer can. A
+/// writable open refuses it; reading still works. Review finding on #100.
+#[test]
+fn directory_entries_sharing_a_grain_table_refuse_open_rw() {
+    let path = tmp_path("shared_gt");
+    build_with_redundant_directory(&path);
+    patch(&path, RGD_OFF_SECTOR * SECTOR, &(RGD_GT_OFF_SECTOR as u32).to_le_bytes());
+
+    VmdkReader::open(&path).expect("a read-only open never writes a table");
+    match VmdkReader::open_rw(&path) {
+        Err(e) => assert!(format!("{e}").contains("grain tables overlap"), "got {e}"),
+        Ok(_) => panic!("opened for writing an image whose directories share a grain table"),
+    }
+}
+
 /// The sibling hole on the primary path: a grain-directory entry naming
 /// metadata passed the end-of-file bound, and a write allocating a grain
 /// in that "table" wrote its entry into whatever the table overlapped.
