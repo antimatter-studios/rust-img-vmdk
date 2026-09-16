@@ -403,6 +403,40 @@ fn a_sidecar_descriptor_for_a_sparse_extent_is_unsupported() {
     }
 }
 
+/// A device that knows its size and fails every read, as a flaky or
+/// failing disk does.
+struct FailingReads(u64);
+impl fs_core::BlockRead for FailingReads {
+    fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> fs_core::Result<()> {
+        Err(fs_core::Error::Io(std::io::Error::other(
+            "simulated device read failure",
+        )))
+    }
+    fn size_bytes(&self) -> u64 {
+        self.0
+    }
+}
+
+/// A failed read of a small file is an I/O error, not a verdict about
+/// the bytes. It was reported as `NotVmdk` — "magic mismatch" — which
+/// discards the error a caller needs to retry or report a failing disk,
+/// and tells a caller probing several formats that nothing here is a
+/// VMDK when nothing was determined at all. See #69.
+#[test]
+fn a_failed_read_of_a_descriptor_sized_file_is_an_io_error() {
+    let size = descriptor_file("monolithicFlat", "RW 2048 FLAT \"disk-flat.vmdk\" 0").len();
+    let dev: Arc<dyn fs_core::BlockRead> = Arc::new(FailingReads(size as u64));
+
+    match VmdkReader::open_on_device(dev) {
+        Err(vmdk::Error::Io(e)) => assert!(
+            e.to_string().contains("simulated device read failure"),
+            "the device's own error must survive, got {e}"
+        ),
+        Err(other) => panic!("expected the read failure as Io, got {other}"),
+        Ok(_) => panic!("opened a device that cannot be read"),
+    }
+}
+
 /// Widening the door for descriptor files must not turn the probe into
 /// one that accepts anything. A short file that is not a descriptor, a
 /// text file with no `createType`, and an empty file are all still "not
