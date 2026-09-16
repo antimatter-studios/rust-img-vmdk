@@ -29,10 +29,18 @@
 //! before the grain is allocated. Crash-safety order:
 //!
 //!   grain data → grain-table entry → grain-directory entry (when growing)
-//!   → device flush
 //!
-//! with `dev.flush()` between each step. A crash mid-allocation may leak
-//! a grain or grain table but never produces a wrong-data read.
+//! A crash mid-allocation may leak a grain or grain table but never
+//! produces a wrong-data read.
+//!
+//! A device flush is an fsync -- `F_FULLFSYNC` on macOS -- so it is
+//! issued only where that order depends on it (#42): after a new grain's
+//! data and before the entry that points at it, after a zeroed table and
+//! before the directory entry that points at it, and between a redundant
+//! entry and the primary one it leads. A write into a grain that already
+//! exists publishes nothing and issues none, and neither does the last
+//! entry of an allocation: [`VmdkReader::flush`] is the caller's
+//! durability barrier.
 //!
 //! ## What a write records about itself
 //!
@@ -174,9 +182,24 @@ pub struct VmdkReader {
     /// Grain tables whose redundant copy this session has already merged
     /// the primary into; see [`VmdkReader::redundant_gt_sector`].
     redundant_merged: Mutex<std::collections::HashSet<usize>>,
-    /// First byte a grain may legally occupy: everything below it is
-    /// the image's own metadata. See [`VmdkReader::grain_host_offset`].
+    /// First byte a grain may legally occupy: `over_head`, the format's
+    /// own statement of how much metadata precedes the grains. See
+    /// [`VmdkReader::grain_host_offset`].
     first_grain_byte: u64,
+    /// The metadata whose position the header states: the sparse header,
+    /// the descriptor, the grain directory and — when one is live — the
+    /// redundant directory. No grain may overlap it, and no grain table
+    /// may either.
+    fixed_metadata: Extents,
+    /// Every grain table a live directory names, primary and redundant,
+    /// plus every table this session allocates.
+    ///
+    /// A scalar floor cannot describe these: qemu puts them under
+    /// `over_head`, but this crate allocates them at the tail, above
+    /// the grains (#63). An `RwLock` rather than behind `allocation`,
+    /// because the read path and the write-through fast path consult it
+    /// without taking `allocation`.
+    grain_tables: RwLock<Extents>,
     /// Byte offset and length of the embedded descriptor region.
     ///
     /// Kept so the `CID=` line can be rewritten in place on the first
@@ -210,6 +233,36 @@ pub struct VmdkReader {
     /// on both paths. Holding `unclean_marked` across the write instead
     /// would self-deadlock in `mark_modified`.
     writes_in_flight: RwLock<()>,
+}
+
+/// A set of byte ranges, kept sorted and merged so an overlap query is a
+/// binary search: a grain directory can name tens of thousands of
+/// tables, and the read path asks once per grain.
+#[derive(Debug, Default)]
+struct Extents(Vec<(u64, u64)>);
+
+impl Extents {
+    /// Add `[start, end)`, merging it with anything it touches.
+    fn insert(&mut self, start: u64, end: u64) {
+        if start >= end {
+            return;
+        }
+        let i = self.0.partition_point(|&(_, e)| e < start);
+        let mut j = i;
+        let (mut s, mut e) = (start, end);
+        while j < self.0.len() && self.0[j].0 <= e {
+            s = s.min(self.0[j].0);
+            e = e.max(self.0[j].1);
+            j += 1;
+        }
+        self.0.splice(i..j, [(s, e)]);
+    }
+
+    /// Whether `[start, end)` shares a byte with the set.
+    fn overlaps(&self, start: u64, end: u64) -> bool {
+        let i = self.0.partition_point(|&(_, e)| e <= start);
+        self.0.get(i).is_some_and(|&(s, _)| s < end)
+    }
 }
 
 /// What a grain-table entry says about its grain.
@@ -497,26 +550,58 @@ impl VmdkReader {
             let end = start.checked_add(len)?;
             (end <= dev_sectors).then_some(end)
         };
-        let mut first_grain_sector = 1; // sector 0 is the sparse header
-        for end in [
-            fits(header.descriptor_offset, header.descriptor_size),
-            fits(header.gd_offset, gd_sectors),
-            (header.rgd_offset != 0)
-                .then(|| fits(header.rgd_offset, gd_sectors))
-                .flatten(),
-            // `over_head` is the format's own statement of how many
-            // sectors of metadata precede the grains. It is the only one
-            // of these that also covers the grain *tables*, whose
-            // positions are otherwise only discoverable one directory
-            // entry at a time.
-            fits(header.over_head, 0),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            first_grain_sector = first_grain_sector.max(end);
-        }
+        //
+        // BUT A SCALAR FLOOR CANNOT DESCRIBE THE LAYOUT (#63). Folding the
+        // directories into it let an `rgd_offset` after the grains lift
+        // the floor over every grain, and grain tables were not in it at
+        // all, so a grain pointer naming one read the table back as data.
+        // So the floor is `over_head` alone, and every other region is an
+        // extent a grain must not overlap: the fixed metadata below, and
+        // every grain table a live directory names.
+        let first_grain_sector = fits(header.over_head, 0).unwrap_or(0).max(1);
         let first_grain_byte = first_grain_sector * SECTOR_SIZE;
+
+        let mut fixed_metadata = Extents::default();
+        fixed_metadata.insert(0, SECTOR_SIZE);
+        let mut add_fixed = |start_sector: u64, sectors: u64| {
+            if let Some(end) = fits(start_sector, sectors) {
+                fixed_metadata.insert(start_sector * SECTOR_SIZE, end * SECTOR_SIZE);
+            }
+        };
+        add_fixed(header.descriptor_offset, header.descriptor_size);
+        add_fixed(header.gd_offset, gd_sectors);
+        if redundant_gd.is_some() {
+            add_fixed(header.rgd_offset, gd_sectors);
+        }
+
+        let gt_bytes = (header.num_gtes_per_gt as u64) * GD_GT_ENTRY_SIZE;
+        let mut grain_tables = Extents::default();
+        let rgd_entries = redundant_gd.as_ref().map(|m| m.lock().unwrap().clone());
+        for &sector in gd.iter().chain(rgd_entries.iter().flatten()) {
+            if sector == 0 {
+                continue;
+            }
+            let start = (sector as u64) * SECTOR_SIZE;
+            let end = start + gt_bytes;
+            // A table that runs past the file or overlaps the fixed
+            // metadata is refused when it is used; it is not a region to
+            // protect.
+            if end <= dev_size && !fixed_metadata.overlaps(start, end) {
+                // TWO ENTRIES, ONE TABLE (review on #100). `insert` merges,
+                // so a second entry naming storage an earlier one already
+                // names would be silently folded in, and a write through
+                // either index would then rewrite the other's mapping. A
+                // read never writes a table, so only a writable open is
+                // refused. Distinct directories name distinct copies, so any
+                // overlap at all is corruption.
+                if writable.is_some() && grain_tables.overlaps(start, end) {
+                    return Err(Error::Corrupt(
+                        "grain tables overlap: two directory entries name the same storage",
+                    ));
+                }
+                grain_tables.insert(start, end);
+            }
+        }
 
         Ok(Self {
             dev,
@@ -534,6 +619,8 @@ impl VmdkReader {
             allocation: Mutex::new(()),
             redundant_merged: Mutex::new(std::collections::HashSet::new()),
             first_grain_byte,
+            fixed_metadata,
+            grain_tables: RwLock::new(grain_tables),
             descriptor_extent: (desc_byte_off, desc_byte_len),
             content_id_bumped: Mutex::new(false),
             unclean_marked: Mutex::new(false),
@@ -608,10 +695,20 @@ impl VmdkReader {
         }
 
         // Walk grain by grain. Each grain either: (a) has a host
-        // location (gd[gt] != 0 and gt[gte] != 0) → read straight from
-        // disk, or (b) is unallocated → fill destination with zero.
+        // location (gd[gt] != 0 and gt[gte] != 0) → read from disk, or
+        // (b) is unallocated → fill destination with zero.
+        //
+        // ONE DEVICE READ PER RUN, NOT PER GRAIN (#43). Grains a writer
+        // laid out back to back -- which is what a converted image is --
+        // are one contiguous host range, and reading them grain by grain
+        // was one `pread` per 64 KiB. A present grain whose host bytes
+        // continue the pending run extends it; anything else reads the
+        // run out first. Each grain's pointer is still validated on its
+        // own before it joins.
         let mut cursor = offset;
         let mut written: usize = 0;
+        // (host offset, start in `buf`, length) of reads not yet issued.
+        let mut run: Option<(u64, usize, usize)> = None;
 
         while cursor < end {
             let GrainAddress {
@@ -620,29 +717,52 @@ impl VmdkReader {
                 gte_idx,
                 chunk_len,
             } = self.grain_address(cursor, end);
-            let dst = &mut buf[written..written + chunk_len];
             let gt_sector = self.gd_entry(gt_idx)?;
-
-            if gt_sector == 0 {
+            let state = if gt_sector == 0 {
                 // Whole grain table unallocated — region reads as zero.
-                dst.fill(0);
+                GrainState::Unallocated
             } else {
-                let entry = self.lookup_grain(gt_idx, gte_idx, gt_sector)?;
-                match self.grain_state(entry) {
-                    GrainState::Unallocated | GrainState::Zeroed => dst.fill(0),
-                    GrainState::At(grain_sector) => {
-                        let host_off =
-                            self.grain_host_offset(grain_sector, in_grain, chunk_len as u64)?;
-                        self.dev_read(host_off, dst)?;
+                self.grain_state(self.lookup_grain(gt_idx, gte_idx, gt_sector)?)
+            };
+
+            match state {
+                GrainState::Unallocated | GrainState::Zeroed => {
+                    if let Some(pending) = run.take() {
+                        self.read_run(buf, pending)?;
                     }
+                    buf[written..written + chunk_len].fill(0);
+                }
+                GrainState::At(grain_sector) => {
+                    let host_off =
+                        self.grain_host_offset(grain_sector, in_grain, chunk_len as u64)?;
+                    run = match run {
+                        Some((at, from, len)) if at + len as u64 == host_off => {
+                            Some((at, from, len + chunk_len))
+                        }
+                        other => {
+                            if let Some(pending) = other {
+                                self.read_run(buf, pending)?;
+                            }
+                            Some((host_off, written, chunk_len))
+                        }
+                    };
                 }
             }
 
             cursor += chunk_len as u64;
             written += chunk_len;
         }
+        if let Some(pending) = run {
+            self.read_run(buf, pending)?;
+        }
 
         Ok(())
+    }
+
+    /// Issue one pending run of [`Self::read_at`]: `len` bytes from host
+    /// offset `at` into `buf[from..]`.
+    fn read_run(&self, buf: &mut [u8], (at, from, len): (u64, usize, usize)) -> Result<()> {
+        self.dev_read(at, &mut buf[from..from + len])
     }
 
     /// Where a byte offset falls in the grain hierarchy, and how much
@@ -702,6 +822,13 @@ impl VmdkReader {
         let end = off
             .checked_add(len)
             .ok_or(Error::Corrupt("grain extent overflows"))?;
+        if self.fixed_metadata.overlaps(off, end)
+            || self.grain_tables.read().unwrap().overlaps(off, end)
+        {
+            return Err(Error::Corrupt(
+                "grain pointer lands inside the image's metadata",
+            ));
+        }
         if end > self.file_extent() {
             return Err(Error::Corrupt("grain extends past EOF"));
         }
@@ -744,6 +871,13 @@ impl VmdkReader {
             if end > self.file_extent() {
                 return Err(Error::Corrupt("grain table extends past EOF"));
             }
+            // Past EOF is not the only way a table pointer is wrong. One
+            // naming the descriptor or a directory passes that bound, and
+            // a write allocating a grain in it publishes the entry over
+            // that metadata (#64).
+            if self.fixed_metadata.overlaps(off, end) {
+                return Err(Error::Corrupt("grain table overlaps the image's metadata"));
+            }
             let mut bytes = vec![0u8; len as usize];
             self.dev_read(off, &mut bytes)?;
             let mut entries = Vec::with_capacity(entries_per_gt);
@@ -771,7 +905,9 @@ impl VmdkReader {
     ///
     /// Crash-safety order:
     ///   grain data → grain-table entry → grain-directory entry (when
-    ///   growing) → flush, with `dev.flush()` between each step.
+    ///   growing), with a device flush only where a later step depends on
+    ///   an earlier one being durable; see the module doc. Call
+    ///   [`VmdkReader::flush`] for durability.
     pub fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         if !self.is_writable() {
             return Err(Error::ReadOnly);
@@ -844,11 +980,12 @@ impl VmdkReader {
         })
     }
 
+    /// No flush: nothing is published, so there is nothing to order the
+    /// write against, and durability is the caller's `flush` (#42).
     fn write_through(&self, grain_sector: u32, addr: &GrainAddress, src: &[u8]) -> Result<()> {
         let host_off =
             self.grain_host_offset(grain_sector, addr.in_grain, addr.chunk_len as u64)?;
-        self.dev_write(host_off, src)?;
-        self.dev_flush()
+        self.dev_write(host_off, src)
     }
 
     /// Give this grain a home and land `src` in it.
@@ -883,6 +1020,10 @@ impl VmdkReader {
         // The zeroed-grain marker takes this branch because it is not a
         // sector number — following it would write the payload over the
         // embedded descriptor.
+        // Resolve (and check) the redundant table before a grain is
+        // allocated, so a bad redundant pointer fails the write without
+        // leaking a grain.
+        self.redundant_gt_sector(addr.gt_idx, gt_sector)?;
         let grain_bytes = self.grain_size_bytes();
         let new_grain_sector = self.allocate_grain()?;
         if addr.in_grain != 0 || (addr.chunk_len as u64) < grain_bytes {
@@ -1038,6 +1179,11 @@ impl VmdkReader {
         if sector > u32::MAX as u64 {
             return Err(Error::Unsupported("grain table sector past u32 range"));
         }
+        // Protected before anything can name it.
+        self.grain_tables
+            .write()
+            .unwrap()
+            .insert(sector * SECTOR_SIZE, (sector + gt_sectors) * SECTOR_SIZE);
         let zeros = vec![0u8; (gt_sectors * SECTOR_SIZE) as usize];
         self.dev_write(sector * SECTOR_SIZE, &zeros)?;
         self.dev_flush()?;
@@ -1120,6 +1266,20 @@ impl VmdkReader {
         let len = (self.grain_table_sectors() * SECTOR_SIZE) as usize;
         let mut merged = self.redundant_merged.lock().unwrap();
         if existing != 0 {
+            // Written to without any check, so an entry naming sector 1
+            // put four bytes of a sector number over the descriptor
+            // (#64). The same two bounds the primary table gets, checked
+            // before the merge below reads and rewrites the whole table.
+            let off = (existing as u64) * SECTOR_SIZE;
+            let end = off + self.grain_table_sectors() * SECTOR_SIZE;
+            if end > self.file_extent() {
+                return Err(Error::Corrupt("redundant grain table extends past EOF"));
+            }
+            if self.fixed_metadata.overlaps(off, end) {
+                return Err(Error::Corrupt(
+                    "redundant grain table overlaps the image's metadata",
+                ));
+            }
             if !merged.contains(&gt_idx) {
                 self.merge_primary_into_redundant(primary_gt_sector, existing, len)?;
                 merged.insert(gt_idx);
@@ -1202,8 +1362,9 @@ impl VmdkReader {
             self.dev_flush()?;
         }
 
+        // No flush after the primary entry: nothing later depends on it
+        // being durable first, and the caller's `flush` makes it so (#42).
         self.dev_write((gt_sector as u64) * SECTOR_SIZE + entry_within, &bytes)?;
-        self.dev_flush()?;
 
         let mut cache = self.gt_cache.lock().unwrap();
         if cache.loaded == Some((gt_idx, gt_sector)) && gte_idx < cache.entries.len() {
@@ -1546,5 +1707,29 @@ fn fs_core_to_vmdk_error(e: fs_core::Error) -> Error {
             Error::OutOfBounds { offset, len, size }
         }
         fs_core::Error::Custom(s) => Error::Io(std::io::Error::other(s)),
+    }
+}
+
+#[cfg(test)]
+mod extents_tests {
+    use super::Extents;
+
+    #[test]
+    fn inserts_merge_and_overlap_is_half_open() {
+        let mut x = Extents::default();
+        x.insert(100, 200);
+        x.insert(300, 400);
+        x.insert(150, 310); // bridges both
+        x.insert(500, 600);
+        x.insert(600, 700); // touches: merged
+        assert_eq!(x.0, vec![(100, 400), (500, 700)]);
+
+        assert!(!x.overlaps(0, 100), "end is exclusive");
+        assert!(x.overlaps(0, 101));
+        assert!(!x.overlaps(400, 500), "the gap between two extents");
+        assert!(x.overlaps(399, 400));
+        assert!(x.overlaps(650, 651));
+        assert!(!x.overlaps(700, 800));
+        assert!(x.overlaps(0, 10_000), "a range covering everything");
     }
 }

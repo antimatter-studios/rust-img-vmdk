@@ -785,6 +785,116 @@ fn without_content_id(region: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A redundant grain-directory entry was written through unchecked, so
+/// one naming sector 1 — the descriptor — had four bytes of a sector
+/// number written over the descriptor by an ordinary guest write, and
+/// the image stopped opening. See #64.
+#[test]
+fn a_redundant_directory_entry_naming_the_descriptor_is_refused() {
+    let path = tmp_path("rgd_into_descriptor");
+    build_with_redundant_directory(&path);
+    patch(&path, RGD_OFF_SECTOR * SECTOR, &1u32.to_le_bytes());
+
+    let result = VmdkReader::open_rw(&path).and_then(|r| r.write_at(0, &[0x33u8; 512]));
+    let err = result.expect_err("a write that would publish into the descriptor must fail");
+    assert!(format!("{err}").contains("metadata"), "got {err}");
+    let descriptor = read_sector(&path, DESC_OFF_SECTOR);
+    assert!(
+        descriptor.starts_with(b"# Disk DescriptorFile\n"),
+        "the descriptor was overwritten: {:?}",
+        String::from_utf8_lossy(&descriptor[..24])
+    );
+    VmdkReader::open(&path).expect("the image must still open");
+}
+
+/// The bound on a redundant table is checked before that table is merged
+/// from the primary, not only before an entry is mirrored into it. The
+/// merge reads and rewrites the whole table, so a redundant entry naming
+/// the descriptor would let it treat sectors 1-4 (descriptor, redundant
+/// directory, redundant table) as a grain table and write primary entries
+/// into whichever of their bytes are zero. Here primary entry 129 is set,
+/// which lands on entry 1 of the redundant directory. Review finding on
+/// #105.
+#[test]
+fn a_redundant_table_naming_metadata_is_refused_before_it_is_merged() {
+    let path = tmp_path("rgd_merge_into_metadata");
+    build_with_redundant_directory(&path);
+    patch(&path, RGD_OFF_SECTOR * SECTOR, &1u32.to_le_bytes());
+    patch(
+        &path,
+        RGD_GT_OFF_SECTOR * SECTOR + 129 * 4,
+        &(RGD_GRAIN0_OFF_SECTOR as u32).to_le_bytes(),
+    );
+    let before: Vec<Vec<u8>> = (1..5).map(|s| read_sector(&path, s)).collect();
+
+    let result = VmdkReader::open_rw(&path).and_then(|r| r.write_at(0, &[0x33u8; 512]));
+    let err = result.expect_err("a write through a redundant table over metadata must fail");
+    assert!(format!("{err}").contains("metadata"), "got {err}");
+    for (i, want) in before.iter().enumerate() {
+        let sector = i as u64 + 1;
+        let got = read_sector(&path, sector);
+        if sector == DESC_OFF_SECTOR {
+            // Opening for write bumps the content id before the refusal.
+            assert_eq!(without_content_id(&got), without_content_id(want));
+        } else {
+            assert_eq!(&got, want, "sector {sector} was rewritten by the merge");
+        }
+    }
+}
+
+/// Two directory entries naming one table make a write through either
+/// index change the other's mapping. Here the redundant directory names
+/// the primary's own table, so mirroring an entry writes it twice into
+/// one table, and a table meant to lead the primary no longer can. A
+/// writable open refuses it; reading still works. Review finding on #100.
+#[test]
+fn directory_entries_sharing_a_grain_table_refuse_open_rw() {
+    let path = tmp_path("shared_gt");
+    build_with_redundant_directory(&path);
+    patch(
+        &path,
+        RGD_OFF_SECTOR * SECTOR,
+        &(RGD_GT_OFF_SECTOR as u32).to_le_bytes(),
+    );
+
+    VmdkReader::open(&path).expect("a read-only open never writes a table");
+    match VmdkReader::open_rw(&path) {
+        Err(e) => assert!(format!("{e}").contains("grain tables overlap"), "got {e}"),
+        Ok(_) => panic!("opened for writing an image whose directories share a grain table"),
+    }
+}
+
+/// The sibling hole on the primary path: a grain-directory entry naming
+/// metadata passed the end-of-file bound, and a write allocating a grain
+/// in that "table" wrote its entry into whatever the table overlapped.
+/// Here the entry names the grain directory's own sector. See #64.
+#[test]
+fn a_primary_directory_entry_naming_metadata_is_refused() {
+    let path = tmp_path("gd_into_gd");
+    let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+    patch(
+        &path,
+        GD_OFF_SECTOR * SECTOR,
+        &(GD_OFF_SECTOR as u32).to_le_bytes(),
+    );
+    let before = read_sector(&path, GD_OFF_SECTOR);
+
+    // Entry 1 of that "table" is byte 4 of the directory sector: zero,
+    // so grain 1 looks sparse and a write allocates it.
+    let r = VmdkReader::open_rw(&path).unwrap();
+    let err = r
+        .write_at(GRAIN_SIZE * SECTOR, &[0x44u8; 512])
+        .expect_err("a table that overlaps the grain directory must not be written into");
+    assert!(format!("{err}").contains("metadata"), "got {err}");
+    drop(r);
+    assert_eq!(
+        read_sector(&path, GD_OFF_SECTOR),
+        before,
+        "the grain directory was overwritten through a bogus table"
+    );
+}
+
 fn read_sector(path: &std::path::Path, sector: u64) -> Vec<u8> {
     let mut f = File::open(path).unwrap();
     f.seek(SeekFrom::Start(sector * SECTOR)).unwrap();
@@ -1302,4 +1412,87 @@ fn an_incomplete_redundant_table_is_merged_from_the_primary_not_overwritten() {
         "an entry only the redundant table held was cleared"
     );
     assert_eq!(primary[5], 0, "the merge runs one way only");
+}
+
+// ---------------------------------------------------------------------------
+// Flushes are ordering barriers, not per-grain durability (#42)
+// ---------------------------------------------------------------------------
+
+/// Counts `flush` calls through to a file.
+struct CountingFlushes {
+    inner: FileDevice,
+    flushes: std::sync::atomic::AtomicUsize,
+}
+
+impl BlockRead for CountingFlushes {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        BlockRead::size_bytes(&self.inner)
+    }
+}
+
+impl BlockDevice for CountingFlushes {
+    fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+        self.inner.write_at(offset, buf)
+    }
+    fn flush(&self) -> fs_core::Result<()> {
+        self.flushes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.flush()
+    }
+    fn is_writable(&self) -> bool {
+        self.inner.is_writable()
+    }
+}
+
+/// A write issues only the device flushes its crash-safety order needs:
+/// none for a write into grains that already exist, and one per
+/// allocated grain -- between its data and the grain-table entry that
+/// publishes it.
+///
+/// Every grain paid a flush after its write-through and another after
+/// its grain-table entry, and on a `FileDevice` a flush is an fsync --
+/// `F_FULLFSYNC` on macOS. Measured on `main` for the writes below: 1
+/// flush for one grain written through, 30 for fifteen grains allocated.
+/// The caller's own `flush` is what makes the last writes durable.
+#[test]
+fn a_write_flushes_only_where_the_ordering_needs_it() {
+    let path = tmp_path("flush_barriers");
+    let grain = (GRAIN_SIZE * SECTOR) as usize;
+    build_grain0_only(&path, &vec![0x11u8; grain]);
+    let dev = Arc::new(CountingFlushes {
+        inner: FileDevice::open_rw(&path).unwrap(),
+        flushes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let r = VmdkReader::open_rw_on_device(dev.clone()).unwrap();
+    // The session's first write raises the unclean marker and bumps the
+    // content id; those flushes are not what this counts.
+    r.write_at(0, &[0x11]).unwrap();
+    let count = || dev.flushes.swap(0, std::sync::atomic::Ordering::SeqCst);
+    count();
+
+    r.write_at(0, &vec![0x22u8; grain]).unwrap();
+    assert_eq!(
+        count(),
+        0,
+        "a write into an allocated grain flushed the device"
+    );
+
+    let sparse = 15 * grain;
+    r.write_at(grain as u64, &vec![0x33u8; sparse]).unwrap();
+    assert_eq!(
+        count(),
+        15,
+        "fifteen allocated grains should cost one ordering flush each"
+    );
+
+    r.flush().unwrap();
+    drop(r);
+    let r = VmdkReader::open(&path).unwrap();
+    let mut back = vec![0u8; 16 * grain];
+    r.read_at(0, &mut back).unwrap();
+    assert!(back[..grain].iter().all(|&b| b == 0x22));
+    assert!(back[grain..].iter().all(|&b| b == 0x33));
 }
