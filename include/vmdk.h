@@ -59,7 +59,10 @@ FsCoreDevice *vmdk_open_rw(const char *path);
  * input is freed automatically and the function returns NULL.
  *
  * `vmdk_open_rw_on_device` requires the input device to report
- * `is_writable()`; otherwise it fails with FS_CORE_READ_ONLY.
+ * `is_writable()`; otherwise it returns NULL (freeing the input) and
+ * `fs_core_last_error_message()` says the backing device is not
+ * writable. Like every constructor here it returns a pointer, so no
+ * FsCoreErrorCode is available; the message is the channel.
  */
 FsCoreDevice *vmdk_open_on_device(FsCoreDevice *inner);
 FsCoreDevice *vmdk_open_rw_on_device(FsCoreDevice *inner);

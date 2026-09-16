@@ -9,6 +9,13 @@ never does.
 
 ### Fixed
 
+- **`vmdk_open_rw_on_device` no longer promises `FS_CORE_READ_ONLY`.** It
+  returns a pointer and `fs_core.h` has no error-code accessor, so the
+  code could never be observed. The header and doc now describe the
+  channel that exists — NULL plus `fs_core_last_error_message()` — and
+  that message names the non-writable backing device instead of saying
+  "image was opened read-only". `Error::ReadOnly`'s own message now names
+  both of its causes.
 - **A short `CID` is widened, not overwritten past its end.** `qemu-img`
   writes the CID unpadded, so about one image in sixteen has fewer than
   eight digits, and the first write glued `parentCID` (or worse) onto the

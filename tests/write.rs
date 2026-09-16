@@ -1019,6 +1019,37 @@ fn open_rw_on_device_refuses_readonly_inner() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// The same refusal, observed from where the header's promise is made:
+/// the C symbol. `vmdk_open_rw_on_device` returns a pointer, so no
+/// `FS_CORE_READ_ONLY` code can reach a C caller; NULL plus
+/// `fs_core_last_error_message()` is the whole channel. That message
+/// said "image was opened read-only", naming an object the caller never
+/// opened, when the cause is the caller's own input device. See #85.
+#[test]
+fn the_c_rw_open_on_a_readonly_device_names_the_device() {
+    let path = tmp_path("ro_inner_capi");
+    let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+
+    let dev = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn BlockDevice>;
+    let inner = fs_core::ffi::FsCoreDevice::into_handle(dev);
+    // Ownership passes to the call, success or failure.
+    let out = unsafe { vmdk::capi::vmdk_open_rw_on_device(inner) };
+    assert!(out.is_null(), "a read-only input device must be refused");
+
+    let msg = unsafe { std::ffi::CStr::from_ptr(fs_core::ffi::fs_core_last_error_message()) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        msg.contains("device") && msg.contains("not writable"),
+        "the message is the only channel, and must name the non-writable input device, got {msg:?}"
+    );
+    assert!(
+        !msg.contains("opened read-only"),
+        "no image was opened read-only here, got {msg:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 9. the unclean-shutdown marker
 // ---------------------------------------------------------------------------

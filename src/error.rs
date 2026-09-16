@@ -35,7 +35,11 @@ impl fmt::Display for Error {
                     "read [{offset}, {offset}+{len}) past virtual size {size}"
                 )
             }
-            Error::ReadOnly => write!(f, "image was opened read-only"),
+            Error::ReadOnly => write!(
+                f,
+                "not writable: the image was opened read-only, or its backing device \
+                 does not accept writes"
+            ),
         }
     }
 }
