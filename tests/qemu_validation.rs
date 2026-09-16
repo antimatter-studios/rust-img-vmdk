@@ -835,3 +835,47 @@ fn qemu_extracts_bytes_we_wrote() {
     let out = std::fs::read(&raw).unwrap();
     assert_eq!(&out[off as usize..off as usize + payload.len()], payload);
 }
+
+/// A qemu image with the redundant-grain-table flag cleared declares no
+/// redundant directory, though its `rgd_offset` still names the old one.
+/// Writing through this crate must leave that residue untouched, and
+/// qemu must still accept the image and read the bytes back (#66).
+#[test]
+fn an_undeclared_redundant_directory_is_left_alone_and_qemu_reads_our_write() {
+    let vmdk = vmdk_path("rgd-undeclared");
+    let raw = raw_path("rgd-undeclared");
+    qemu_create(&vmdk, "4M");
+
+    let mut image = std::fs::read(&vmdk).unwrap();
+    let flags = u32::from_le_bytes(image[8..12].try_into().unwrap());
+    assert!(
+        flags & 0x2 != 0,
+        "fixture precondition: qemu declares the redundant directory"
+    );
+    image[8..12].copy_from_slice(&(flags & !0x2).to_le_bytes());
+    std::fs::write(&vmdk, &image).unwrap();
+    let rgd = u64::from_le_bytes(image[48..56].try_into().unwrap()) as usize * 512;
+    let gd = u64::from_le_bytes(image[56..64].try_into().unwrap()) as usize * 512;
+    assert!(
+        rgd != 0 && rgd < gd,
+        "fixture precondition: qemu lays the redundant copy first"
+    );
+    let residue_before = image[rgd..gd].to_vec();
+
+    let payload = b"written-with-no-redundant-directory";
+    let off = 1024 * 1024 + 3;
+    let r = VmdkReader::open_rw(&vmdk).unwrap();
+    r.write_at(off, payload).unwrap();
+    r.flush().unwrap();
+    drop(r);
+
+    let image = std::fs::read(&vmdk).unwrap();
+    assert!(
+        image[rgd..gd] == residue_before[..],
+        "the undeclared redundant directory and its tables were written to"
+    );
+    qemu_check(&vmdk);
+    qemu_convert_vmdk_to_raw(&vmdk, &raw);
+    let out = std::fs::read(&raw).unwrap();
+    assert_eq!(&out[off as usize..off as usize + payload.len()], payload);
+}
