@@ -1250,3 +1250,56 @@ fn a_flush_does_not_lower_the_marker_under_a_write_in_flight() {
         .unwrap();
     assert_eq!(got, [0x42u8; 512]);
 }
+
+/// A redundant grain table that exists but is incomplete is merged from
+/// the primary before it is used, and nothing it holds is cleared (#65).
+///
+/// The redundant table was seeded only when its directory entry was
+/// zero. An existing one was used as found, so an image written by this
+/// crate at 0.3.5 or earlier -- redundant entry published, table never
+/// populated -- got its first new entry mirrored into an otherwise empty
+/// table, which then claimed that grain and denied every older one.
+/// Measured on `main` for the writes below: `primary[0]=12`,
+/// `redundant[0]=0` after the write, a 64 KiB hole to a recovery tool.
+///
+/// Not a copy: an entry only the redundant table holds is what it keeps
+/// after a crash between its write and the primary's, and survives.
+#[test]
+fn an_incomplete_redundant_table_is_merged_from_the_primary_not_overwritten() {
+    let path = tmp_path("stale_redundant_table");
+    build_with_redundant_directory(&path);
+    {
+        let r = VmdkReader::open_rw(&path).unwrap();
+        r.write_at(0, &[0x55u8; 512]).unwrap();
+        r.flush().unwrap();
+    }
+    let grain0 = read_grain_sector_value(&path, RGD_GT_OFF_SECTOR as u32, 0);
+    assert_ne!(grain0, 0, "fixture: the first write allocated grain 0");
+    // The stale shape: the redundant table lost grain 0, and holds an
+    // entry the primary has not got.
+    let redundant_only: u32 = 0x4000;
+    patch(&path, RGT_OFF_SECTOR * SECTOR, &0u32.to_le_bytes());
+    patch(
+        &path,
+        RGT_OFF_SECTOR * SECTOR + 5 * 4,
+        &redundant_only.to_le_bytes(),
+    );
+
+    {
+        let r = VmdkReader::open_rw(&path).unwrap();
+        r.write_at(GRAIN_SIZE * SECTOR, &[0x66u8; 512]).unwrap();
+        r.flush().unwrap();
+    }
+    let primary = read_grain_table(&path, RGD_GT_OFF_SECTOR as u32);
+    let redundant = read_grain_table(&path, RGT_OFF_SECTOR as u32);
+    assert_eq!(
+        redundant[0], grain0,
+        "the redundant table still denies grain 0 the primary holds"
+    );
+    assert_eq!(redundant[1], primary[1], "the new entry was not mirrored");
+    assert_eq!(
+        redundant[5], redundant_only,
+        "an entry only the redundant table held was cleared"
+    );
+    assert_eq!(primary[5], 0, "the merge runs one way only");
+}
