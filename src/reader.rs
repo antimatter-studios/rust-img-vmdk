@@ -378,6 +378,13 @@ impl VmdkReader {
         }
         let descriptor = Descriptor::parse(desc_text)?;
         descriptor_agrees_with_header(&descriptor, &header)?;
+        // The first write rewrites the CID. If that rewrite would have to
+        // guess where the field ends, refuse now — before a caller has
+        // committed to a write — rather than on it (#67). A read-only open
+        // never touches the CID and does not care.
+        if writable.is_some() {
+            locate_content_id(&desc_bytes).map_err(Error::Corrupt)?;
+        }
 
         // Primary grain directory.
         if header.gd_offset == 0 {
@@ -917,10 +924,16 @@ impl VmdkReader {
 
     /// Rewrite the descriptor's `CID=` line with a fresh value.
     ///
-    /// A `CID` is eight hex digits, so the replacement is exactly as long
-    /// as the original and the rewrite is confined to those eight bytes:
-    /// nothing after the line moves, and the region keeps the length
-    /// `descriptorSize` declares.
+    /// The new value is always eight hex digits. The field it replaces is
+    /// usually eight too, and then only those bytes change. But
+    /// `qemu-img` writes the CID as an unpadded `%x`, so about one image
+    /// in sixteen has fewer — and writing eight bytes in place over a
+    /// seven-digit field ate its newline and glued `parentCID` onto it
+    /// (#67). A short field is therefore widened: everything after it
+    /// moves right into the region's NUL padding, and the region keeps
+    /// the length `descriptorSize` declares. [`locate_content_id`] refuses
+    /// a field it cannot rewrite exactly, and `open_rw` has already
+    /// checked that.
     ///
     /// A descriptor with no `CID` line is left alone. Every image the
     /// reference producers write has one, and inserting one would move
@@ -930,15 +943,17 @@ impl VmdkReader {
         let (off, len) = self.descriptor_extent;
         let mut bytes = vec![0u8; len as usize];
         self.dev_read(off, &mut bytes)?;
-        let Some(at) = find_content_id_digits(&bytes) else {
+        let Some(field) = locate_content_id(&bytes).map_err(Error::Corrupt)? else {
             return Ok(());
         };
-        let current = std::str::from_utf8(&bytes[at..at + CID_DIGITS])
+        let current = std::str::from_utf8(&bytes[field.start..field.start + field.len])
             .ok()
             .and_then(|s| u32::from_str_radix(s, 16).ok())
             .unwrap_or(0);
         let next = next_content_id(current);
-        self.dev_write(off + at as u64, format!("{next:08x}").as_bytes())?;
+        let mut rewritten = format!("{next:08x}").into_bytes();
+        rewritten.extend_from_slice(&bytes[field.start + field.len..field.content_end]);
+        self.dev_write(off + field.start as u64, &rewritten)?;
         self.dev_flush()
     }
 
@@ -1270,21 +1285,68 @@ fn describe_descriptor_file(dev: &Arc<dyn BlockRead>, dev_size: u64) -> Error {
 /// How many hex digits a descriptor's `CID` value has.
 const CID_DIGITS: usize = 8;
 
-/// Where the eight hex digits of the descriptor's `CID=` value begin, if
-/// the region has such a line.
+/// Where a descriptor's `CID=` value is, as [`locate_content_id`] found it.
+struct ContentIdField {
+    /// Byte offset of the first hex digit.
+    start: usize,
+    /// How many hex digits the value has: one to [`CID_DIGITS`].
+    len: usize,
+    /// One past the region's last non-NUL byte — the end of the text that
+    /// has to move when a short value is widened.
+    content_end: usize,
+}
+
+/// Find the descriptor's `CID=` value and check it can be rewritten as
+/// eight digits without losing a byte.
+///
+/// `Ok(None)` when there is no `CID=` line at all: every image the
+/// reference producers write has one, and inserting one would move every
+/// byte after it on the strength of a field being absent.
 ///
 /// Matched at the start of a line so that `parentCID=` — which is the
 /// *other* half of the pair and must not move — cannot be mistaken for
 /// it.
-fn find_content_id_digits(region: &[u8]) -> Option<usize> {
+///
+/// The value must be one to eight hex digits ended by a line end, a NUL,
+/// or the end of the region. The previous matcher checked only that
+/// eight bytes remained, so a short field had its terminator and the
+/// start of the next line overwritten (#67). Anything else — non-hex,
+/// too long, trailing text, or a short value with no NUL padding left to
+/// widen into — is refused rather than guessed at.
+fn locate_content_id(region: &[u8]) -> std::result::Result<Option<ContentIdField>, &'static str> {
     let mut at_line_start = true;
+    let mut found = None;
     for i in 0..region.len() {
-        if at_line_start && region[i..].starts_with(b"CID=") && i + 4 + CID_DIGITS <= region.len() {
-            return Some(i + 4);
+        if at_line_start && region[i..].starts_with(b"CID=") {
+            found = Some(i + 4);
+            break;
         }
         at_line_start = region[i] == b'\n' || region[i] == b'\r';
     }
-    None
+    let Some(start) = found else {
+        return Ok(None);
+    };
+    let len = region[start..]
+        .iter()
+        .take_while(|b| b.is_ascii_hexdigit())
+        .count();
+    let terminated = matches!(region.get(start + len), None | Some(b'\n' | b'\r' | b'\0'));
+    if len == 0 || len > CID_DIGITS || !terminated {
+        return Err("descriptor CID is not one to eight hex digits on its own line");
+    }
+    let content_end = region
+        .iter()
+        .rposition(|&b| b != 0)
+        .map_or(0, |last| last + 1)
+        .max(start + len);
+    if content_end + (CID_DIGITS - len) > region.len() {
+        return Err("descriptor CID is too short to widen and the descriptor region has no room");
+    }
+    Ok(Some(ContentIdField {
+        start,
+        len,
+        content_end,
+    }))
 }
 
 /// The next content identifier, given the current one.

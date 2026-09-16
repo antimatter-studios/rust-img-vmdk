@@ -718,6 +718,67 @@ fn writing_to_an_image_changes_the_content_id_qemu_still_reads() {
     VmdkReader::open(&p).expect("the rewritten descriptor must still parse");
 }
 
+/// `qemu-img create` writes the CID as an unpadded `%x`, so about one
+/// image in sixteen carries fewer than eight digits — and the first write
+/// used to overwrite that field's newline and glue `parentCID` onto it,
+/// which made this job fail intermittently on unrelated PRs (#67, #87).
+/// Forced here rather than left to chance: the qemu image's CID is
+/// rewritten to seven digits, then written through this crate, and qemu
+/// must still accept the image, read the bytes, and find `parentCID`.
+#[test]
+fn a_seven_digit_qemu_cid_survives_our_write() {
+    let p = vmdk_path("cid7");
+    qemu_create(&p, "8M");
+
+    // Replace the CID line with a seven-digit one, keeping the region's
+    // length: shift the rest left one byte and pad with a NUL.
+    let mut image = std::fs::read(&p).unwrap();
+    let desc_off = u64::from_le_bytes(image[28..36].try_into().unwrap()) as usize * 512;
+    let desc_len = u64::from_le_bytes(image[36..44].try_into().unwrap()) as usize * 512;
+    let region = &image[desc_off..desc_off + desc_len];
+    let text_end = region.iter().position(|&b| b == 0).unwrap_or(region.len());
+    let text = std::str::from_utf8(&region[..text_end]).unwrap().to_owned();
+    let line_start = text.find("\nCID=").expect("qemu writes a CID line") + 1;
+    let line_end = line_start + text[line_start..].find('\n').unwrap();
+    let forced = format!("{}CID=792f8d9{}", &text[..line_start], &text[line_end..]);
+    let mut new_region = forced.into_bytes();
+    new_region.resize(desc_len, 0);
+    image[desc_off..desc_off + desc_len].copy_from_slice(&new_region);
+    std::fs::write(&p, &image).unwrap();
+    assert_eq!(
+        descriptor_cid(&p),
+        "792f8d9",
+        "the fixture must start with a short CID"
+    );
+    qemu_check(&p);
+
+    let r = VmdkReader::open_rw(&p).unwrap();
+    r.write_at(1024 * 1024, &[0x3Cu8; 4096]).unwrap();
+    r.flush().unwrap();
+    drop(r);
+
+    let after = descriptor_cid(&p);
+    assert!(
+        after.len() == 8 && after.chars().all(|c| c.is_ascii_hexdigit()),
+        "a CID is eight hex digits on its own line: {after:?}"
+    );
+    let image = std::fs::read(&p).unwrap();
+    let region = String::from_utf8_lossy(&image[desc_off..desc_off + desc_len]).into_owned();
+    assert!(
+        region.lines().any(|l| l == "parentCID=ffffffff"),
+        "parentCID must survive the CID rewrite as its own line: {region:?}"
+    );
+    assert!(region.contains("createType=\"monolithicSparse\""));
+
+    assert_eq!(qemu_virtual_size(&p), 8 * 1024 * 1024);
+    qemu_check(&p);
+    let raw = raw_path("cid7");
+    qemu_convert_vmdk_to_raw(&p, &raw);
+    let out = std::fs::read(&raw).unwrap();
+    assert_eq!(&out[1024 * 1024..1024 * 1024 + 4096], &[0x3Cu8; 4096]);
+    VmdkReader::open(&p).expect("the rewritten descriptor must still parse");
+}
+
 /// An open that writes nothing must not change the content identifier.
 /// The CID says the contents changed; bumping it on every open would
 /// make a child stale for having been looked at.
