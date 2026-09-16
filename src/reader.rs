@@ -1270,6 +1270,13 @@ fn describe_descriptor_file(dev: &Arc<dyn BlockRead>, dev_size: u64) -> Error {
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return Error::NotVmdk;
     };
+    // `Descriptor::parse` needs only a `createType` line, so without this
+    // any text file naming one was called an unsupported VMDK — which tells
+    // a probing caller to stop looking (#70). Checked here and not in
+    // `parse`, which the embedded-descriptor path shares.
+    if !is_structurally_a_descriptor_file(text) {
+        return Error::NotVmdk;
+    }
     match Descriptor::parse(text) {
         Err(Error::Unsupported(msg)) => Error::Unsupported(msg),
         // A descriptor that says `monolithicSparse` and is a file of its
@@ -1284,6 +1291,34 @@ fn describe_descriptor_file(dev: &Arc<dyn BlockRead>, dev_size: u64) -> Error {
         // honest answer.
         Err(_) => Error::NotVmdk,
     }
+}
+
+/// Whether `text` has the shape of a VMDK descriptor file, beyond merely
+/// naming a `createType`.
+///
+/// Every descriptor the reference producers write opens with the
+/// `# Disk DescriptorFile` banner, carries `version=` and `CID=`, and
+/// names at least one extent. Required here: the banner as the first
+/// non-empty line **or** both `version` and `CID` keys, **and** one
+/// parseable extent line. A banner found anywhere would accept a config
+/// file that merely quotes it; a hand-written descriptor without the
+/// banner still passes on its keys. Failing this says "not a VMDK", the
+/// direction that lets a caller keep probing.
+fn is_structurally_a_descriptor_file(text: &str) -> bool {
+    let mut lines = text
+        .lines()
+        .map(|l| l.trim_matches(|c: char| c == '\0' || c.is_whitespace()));
+    let banner = lines
+        .clone()
+        .find(|l| !l.is_empty())
+        .is_some_and(|l| l == "# Disk DescriptorFile");
+    let has_key = |want: &str| {
+        text.lines()
+            .filter_map(|l| l.split_once('='))
+            .any(|(key, _)| key.trim() == want)
+    };
+    let names_an_extent = lines.any(|l| crate::descriptor::parse_extent(l).is_some());
+    (banner || (has_key("version") && has_key("CID"))) && names_an_extent
 }
 
 /// How many hex digits a descriptor's `CID` value has.

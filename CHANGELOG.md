@@ -9,6 +9,11 @@ never does.
 
 ### Fixed
 
+- **A text file naming a `createType` is not a VMDK.** A small file was
+  reported as an unsupported VMDK on the strength of that one line, which
+  tells a caller probing several formats to stop looking. A descriptor
+  file must now open with the `# Disk DescriptorFile` banner or carry
+  `version` and `CID`, and name an extent; otherwise it is `NotVmdk`.
 - **A failed read of a descriptor-sized file is an I/O error.** It was
   reported as `NotVmdk` ("magic mismatch"), discarding the device's error
   and telling a caller probing several formats to move on when nothing
