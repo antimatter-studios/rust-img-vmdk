@@ -26,6 +26,9 @@ use std::process::Command;
 
 use vmdk::VmdkReader;
 
+mod common;
+use common::TempPath;
+
 const QEMU_IMG: &str = "qemu-img";
 const QEMU_IO: &str = "qemu-io";
 
@@ -69,33 +72,14 @@ fn assert_qemu(args: &[&str]) {
     );
 }
 
+/// Self-deleting, so a panicking assertion leaves nothing behind. The
+/// shared helper names a `.vmdk`; a raw image takes that path with its
+/// extension swapped, keeping the same unique stem.
 fn tmp(ext: &str, name: &str) -> TempPath {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!("vmdk_qemu_{}_{n}_{name}.{ext}", std::process::id()));
-    TempPath(p)
-}
-
-/// RAII temp-file path: removes the backing file on drop so a panicking
-/// assertion can't leak fixtures into the temp dir across CI runs.
-struct TempPath(PathBuf);
-impl std::ops::Deref for TempPath {
-    type Target = std::path::Path;
-    fn deref(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-impl AsRef<std::path::Path> for TempPath {
-    fn as_ref(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+    let mut p = TempPath::new(&format!("qemu_{name}"));
+    let path = p.0.with_extension(ext);
+    p.0 = path;
+    p
 }
 
 fn vmdk_path(name: &str) -> TempPath {

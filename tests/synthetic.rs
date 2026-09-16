@@ -17,14 +17,13 @@
 //! "allocated grain" and "unallocated grain → zero" paths.
 
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use vmdk::header::{offsets, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC};
 use vmdk::VmdkReader;
 
 mod common;
-use common::{patch, TempPath};
+use common::{patch, TempPath, WriteAt};
 
 /// Self-deleting, so a panicking assertion leaves nothing behind.
 fn tmp_path(name: &str) -> TempPath {
@@ -32,16 +31,6 @@ fn tmp_path(name: &str) -> TempPath {
 }
 
 const SECTOR: u64 = 512;
-
-trait WriteAt {
-    fn write_all_at(&mut self, buf: &[u8], offset: u64) -> std::io::Result<()>;
-}
-impl WriteAt for File {
-    fn write_all_at(&mut self, buf: &[u8], offset: u64) -> std::io::Result<()> {
-        self.seek(SeekFrom::Start(offset))?;
-        self.write_all(buf)
-    }
-}
 
 /// Layout constants shared by every fixture. Values chosen to make the
 /// math obvious — single GT, grain 0 lands at a clean sector.
@@ -146,8 +135,6 @@ fn opens_and_reports_virtual_size() {
     let r = VmdkReader::open(&path).unwrap();
     assert_eq!(r.virtual_size(), CAPACITY_SECTORS * SECTOR);
     assert_eq!(r.grain_size_bytes(), GRAIN_SIZE * SECTOR);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -168,8 +155,6 @@ fn allocated_grain_round_trip() {
     let mut buf2 = vec![0u8; 200];
     r.read_at(500, &mut buf2).unwrap();
     assert_eq!(&buf2[..], &pattern[500..700]);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -188,8 +173,6 @@ fn unallocated_grain_reads_zero() {
         buf.iter().all(|&b| b == 0),
         "unallocated grain must read as zero"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Byte offset of grain-table entry `gte`.
@@ -263,8 +246,6 @@ fn whole_image_unallocated_reads_zero() {
     let mut buf = vec![0xCDu8; 8192];
     r.read_at(0, &mut buf).unwrap();
     assert!(buf.iter().all(|&b| b == 0));
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -279,8 +260,6 @@ fn read_past_end_errors() {
         .read_at(CAPACITY_SECTORS * SECTOR - 8, &mut buf)
         .unwrap_err();
     assert!(matches!(err, vmdk::Error::OutOfBounds { .. }));
-
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -306,8 +285,6 @@ fn rejects_non_monolithic_sparse() {
         Err(other) => panic!("expected Unsupported, got {other}"),
         Ok(_) => panic!("expected Unsupported, got Ok"),
     }
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -325,8 +302,6 @@ fn fs_core_blockread_size_matches_virtual() {
         <VmdkReader as fs_core::BlockRead>::size_bytes(&r),
         CAPACITY_SECTORS * SECTOR
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------

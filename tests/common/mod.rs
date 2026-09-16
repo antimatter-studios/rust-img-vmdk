@@ -114,16 +114,41 @@ mod tests {
         });
         assert!(outcome.is_err(), "the closure must have panicked");
 
-        let dir = std::env::temp_dir();
-        let strays: Vec<_> = std::fs::read_dir(&dir)
-            .expect("read temp dir")
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with("vmdk_drop_probe_"))
-            .collect();
+        let strays = drop_probe_strays();
         assert!(
             strays.is_empty(),
             "a panicking test left fixtures behind: {strays:?}"
+        );
+    }
+
+    /// Probe files in the temp directory that belong to THIS process.
+    fn drop_probe_strays() -> Vec<String> {
+        std::fs::read_dir(std::env::temp_dir())
+            .expect("read temp dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!("vmdk_drop_probe_{}_", std::process::id())))
+            .collect()
+    }
+
+    /// Another process's probe is not this test's stray.
+    ///
+    /// `mod common` compiles into several test binaries, so the drop
+    /// test runs in several processes sharing one temp directory; and
+    /// one that genuinely crashed leaves its probe behind. Matching on
+    /// the prefix alone failed every later run of every binary on that
+    /// corpse until someone cleared the directory by hand — the pid
+    /// `TempPath::new` puts in the name exists to prevent that. See #46.
+    #[test]
+    fn a_probe_left_by_another_process_is_not_counted() {
+        // pid 0 is never a test process, so this stands for a corpse.
+        let foreign = TempPath(std::env::temp_dir().join("vmdk_drop_probe_0_0.vmdk"));
+        std::fs::write(&foreign.0, b"x").expect("plant a foreign probe");
+
+        let strays = drop_probe_strays();
+        assert!(
+            !strays.iter().any(|n| n == "vmdk_drop_probe_0_0.vmdk"),
+            "another process's probe was counted as this one's stray: {strays:?}"
         );
     }
 }

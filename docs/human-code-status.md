@@ -47,9 +47,12 @@ is exactly when a fixture is most likely to be abandoned and least likely to be
 noticed, because attention is on the failure.
 
 `tests/common/mod.rs` holds one self-deleting `TempPath` and the portable
-`WriteAt`. The proof is a test rather than an assertion about intent: it runs a
-panicking closure under `catch_unwind` and then requires the temp directory to
-hold nothing named for it. Disabling the `Drop` fails it.
+`WriteAt`, and all four fixture-building test files use it (`corruption.rs` and
+`qemu_validation.rs` kept their own copies until #46). The proof is a test rather
+than an assertion about intent: it runs a panicking closure under `catch_unwind`
+and then requires the temp directory to hold nothing named for it **by this
+process** — the pid in the name keeps another binary's crashed run from failing
+it. Disabling the `Drop` fails it.
 
 M4's builders now share that harness and take `&Path` rather than `&PathBuf`, so
 a fixture type can change without touching them.
