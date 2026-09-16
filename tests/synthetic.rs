@@ -233,6 +233,55 @@ fn a_grain_pointer_into_the_descriptor_is_refused() {
     );
 }
 
+/// A grain table is metadata wherever it sits. The guard was a scalar
+/// floor built from the descriptor, the directories and `over_head`, and
+/// grain tables reached through the directory were not in it — so with
+/// `over_head` short of the table, a grain pointer naming the table read
+/// the table back as guest data. See #63.
+#[test]
+fn a_grain_pointer_into_a_grain_table_is_refused() {
+    let path = tmp_path("grain_in_gt");
+    let pattern = vec![0x5Au8; (GRAIN_SIZE * SECTOR) as usize];
+    build_vmdk(&path, true, &pattern);
+    // over_head stops at the grain directory; the table at sector 3 is
+    // above the floor.
+    patch(&path, 64, &3u64.to_le_bytes());
+    patch(&path, gte_offset(1), &(GT_OFF_SECTOR as u32).to_le_bytes());
+
+    let r = VmdkReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 512];
+    let err = r
+        .read_at(GRAIN_SIZE * SECTOR, &mut buf)
+        .expect_err("a grain inside a grain table must not read as data");
+    assert!(
+        format!("{err}").contains("metadata"),
+        "expected a refusal naming the metadata region, got {err}"
+    );
+    // Grain 0 is still where it was and still reads.
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, vec![0x5Au8; 512]);
+}
+
+/// The other failure of a scalar floor: an `rgd_offset` inside the file
+/// but after the grains lifted the floor above every grain, so a fully
+/// readable image became unreadable. The image's flags declare no
+/// redundant directory, and nothing on the read path consults one. See
+/// #63.
+#[test]
+fn a_trailing_undeclared_rgd_offset_does_not_hide_the_grains() {
+    let path = tmp_path("trailing_rgd");
+    let pattern: Vec<u8> = (0..GRAIN_SIZE * SECTOR).map(|i| (i % 251) as u8).collect();
+    build_vmdk(&path, true, &pattern);
+    // The last sector of grain 0; the file is 135 sectors.
+    patch(&path, 48, &134u64.to_le_bytes());
+
+    let r = VmdkReader::open(&path).unwrap();
+    let mut buf = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+    r.read_at(0, &mut buf)
+        .expect("an undeclared redundant directory must not make grain 0 unreadable");
+    assert_eq!(buf, pattern);
+}
+
 #[test]
 fn whole_image_unallocated_reads_zero() {
     // No grains allocated at all — exercises the "gt_sector != 0 but
