@@ -9,6 +9,11 @@ never does.
 
 ### Fixed
 
+- **`flush` waits for writes in flight before lowering `uncleanShutdown`.**
+  It took only the marker's own lock, so a flush concurrent with a write
+  lowered the marker while the write was still running, and a crash then
+  looked like a clean close. Writers still do not serialise with each
+  other.
 - **The redundant grain directory is live only when the header declares
   it.** `FLAG_REDUNDANT_GRAIN_TABLE` was defined and never read, so a
   residual `rgd_offset` in an image whose flags declare no redundant copy

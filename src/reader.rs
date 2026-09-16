@@ -80,7 +80,7 @@ use crate::error::{Error, Result};
 use crate::header::{offsets, SparseHeader, GTE_ZEROED_GRAIN, HEADER_SIZE};
 use fs_core::{BlockDevice, BlockRead, FileDevice};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Bytes per sector. `pub` because the test fixtures build images in
 /// sector units and were each redeclaring their own copy.
@@ -195,6 +195,18 @@ pub struct VmdkReader {
     /// common case — write, write, write, flush — to one raise and one
     /// lower rather than one of each per write.
     unclean_marked: Mutex<bool>,
+    /// Held shared by every `write_at` for its whole body, and exclusively
+    /// by `flush`.
+    ///
+    /// `flush` lowers `uncleanShutdown`, which says the writes are
+    /// complete. Taking only `unclean_marked` let it lower the marker
+    /// while a write was still running, so a crash then left a
+    /// half-written image indistinguishable from a clean close (#68).
+    /// Writers still do not serialise against each other — they share
+    /// the read side — and the lock order is this, then `unclean_marked`,
+    /// on both paths. Holding `unclean_marked` across the write instead
+    /// would self-deadlock in `mark_modified`.
+    writes_in_flight: RwLock<()>,
 }
 
 /// What a grain-table entry says about its grain.
@@ -521,6 +533,7 @@ impl VmdkReader {
             descriptor_extent: (desc_byte_off, desc_byte_len),
             content_id_bumped: Mutex::new(false),
             unclean_marked: Mutex::new(false),
+            writes_in_flight: RwLock::new(()),
         })
     }
 
@@ -774,6 +787,10 @@ impl VmdkReader {
             });
         }
 
+        // Spans `mark_modified` as well as the loop: a flush slipping in
+        // between the two would lower the marker just raised.
+        let _in_flight = self.writes_in_flight.read().unwrap();
+
         // BEFORE ANY DATA MOVES, NOT AFTER.
         //
         // A crash between the stamp and the write leaves an image whose
@@ -883,6 +900,9 @@ impl VmdkReader {
         if !self.is_writable() {
             return Ok(());
         }
+        // Wait for writes in flight, and hold new ones off, before the
+        // device flush as well as before the marker comes down.
+        let _quiesced = self.writes_in_flight.write().unwrap();
         self.dev_flush()?;
         // A clean sync is the caller saying its writes are complete, so
         // the unclean-shutdown marker comes down. A crash between a write
