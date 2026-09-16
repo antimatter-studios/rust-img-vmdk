@@ -359,13 +359,21 @@ impl VmdkReader {
         // a refusal to trust the disk; `Unsupported` says to use a
         // different reader or convert it. Only a descriptor region with
         // *content* that fails to parse deserves the first.
+        //
+        // BUT THE MESSAGE MUST NOT SAY WHICH OF THE TWO IT IS. A monolithic
+        // image whose descriptor was erased is byte-identical here to a
+        // split extent: same magic, same nonzero descriptor offset and
+        // size, all NUL. Only the sibling filename tells them apart, and a
+        // device has no filename. So name both and let the caller, who has
+        // the path, decide (#72).
         if desc_text
             .trim_matches(|c: char| c == '\0' || c.is_whitespace())
             .is_empty()
         {
             return Err(Error::Unsupported(
-                "one extent of a multi-extent VMDK — its descriptor region is empty by \
-                 design, and the descriptor lives in the sidecar .vmdk beside it",
+                "the embedded descriptor region is entirely empty: either one extent \
+                 of a split disk, whose descriptor is in the sidecar .vmdk beside it, \
+                 or an image whose descriptor has been erased",
             ));
         }
         let descriptor = Descriptor::parse(desc_text)?;

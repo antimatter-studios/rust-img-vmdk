@@ -455,6 +455,36 @@ fn an_empty_descriptor_region_is_a_split_extent_not_a_corrupt_image() {
     }
 }
 
+/// An erased descriptor region is byte-identical to a split extent's: same
+/// magic, same nonzero descriptor offset and size, all NUL. The layout is
+/// knowable only from the sibling filename, and a device has none — so
+/// the refusal must name both readings rather than assert one. Stating
+/// "empty by design" about an image whose descriptor was wiped sends its
+/// owner looking for a sidecar that does not exist. See #72.
+#[test]
+fn an_empty_descriptor_region_names_both_layouts_it_could_be() {
+    let path = tmp_path("erased_descriptor");
+    build_valid(&path);
+    // A monolithic image, then its descriptor erased: not a split extent.
+    patch(&path, DESC_OFF_SECTOR * SECTOR, &[0u8; SECTOR as usize]);
+
+    match VmdkReader::open(&path) {
+        Err(Error::Unsupported(msg)) => {
+            assert!(
+                msg.contains("split") && msg.contains("erased"),
+                "the refusal must offer both a split extent and an erased \
+                 descriptor, got {msg:?}"
+            );
+            assert!(
+                !msg.contains("by design"),
+                "the refusal asserts a layout the device cannot establish: {msg:?}"
+            );
+        }
+        Err(other) => panic!("expected Unsupported, got {other}"),
+        Ok(_) => panic!("opened an image with no descriptor"),
+    }
+}
+
 /// The distinction the change rests on: a descriptor region with content
 /// the parser cannot make sense of is still `Corrupt`. Widening the
 /// empty case must not turn every unreadable descriptor into "this is a

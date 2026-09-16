@@ -9,6 +9,11 @@ never does.
 
 ### Fixed
 
+- **An empty embedded descriptor no longer claims to be a split-disk
+  extent.** An erased descriptor region is byte-identical to a split
+  extent's, and a device has no filename to tell them apart, so the
+  `Unsupported` message now names both readings instead of asserting
+  "empty by design". The classification is unchanged.
 - **A write changes the image's content identifier.** Every VMware
   descriptor carries a `CID` and a child disk records its parent's value
   in `parentCID`, so a child whose remembered value no longer matches can
