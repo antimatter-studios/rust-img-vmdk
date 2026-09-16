@@ -462,6 +462,67 @@ fn files_that_are_not_vmdks_still_say_so() {
     }
 }
 
+/// A `createType` line is not what makes a file a VMDK descriptor.
+/// `Unsupported` tells a caller probing several formats "this IS a VMDK,
+/// stop looking", so an unrelated text file that happens to contain the
+/// token took a real reader's place in the chain. See #70.
+///
+/// Both halves: the two inputs from the issue are `NotVmdk`, and real
+/// descriptor files — with the banner, or without it but with `version`
+/// and `CID` — are still refused by their create type.
+#[test]
+fn a_create_type_line_alone_does_not_make_a_descriptor_file() {
+    for (name, text) in [
+        (
+            "config",
+            "# my app config\nname = thing\ncreateType = \"monolithicFlat\"\n",
+        ),
+        ("bare", "createType=monolithicSparse\n"),
+        (
+            "no_extent",
+            "# Disk DescriptorFile\nversion=1\nCID=fffffffe\ncreateType=\"monolithicFlat\"\n",
+        ),
+        (
+            "banner_not_first",
+            "# my app config\n# Disk DescriptorFile\ncreateType=\"monolithicFlat\"\n\
+             RW 2048 FLAT \"disk-flat.vmdk\" 0\n",
+        ),
+    ] {
+        let path = tmp_path(&format!("not_desc_{name}"));
+        std::fs::write(&path, text).unwrap();
+        match VmdkReader::open(&path) {
+            Err(vmdk::Error::NotVmdk) => {}
+            Err(other) => panic!("{name}: expected NotVmdk, got {other}"),
+            Ok(_) => panic!("{name}: opened a file that is not a VMDK"),
+        }
+    }
+
+    for (name, text) in [
+        (
+            "no_banner",
+            "version=1\nCID=fffffffe\nparentCID=ffffffff\n\
+             createType=\"monolithicFlat\"\nRW 2048 FLAT \"disk-flat.vmdk\" 0\n",
+        ),
+        (
+            "banner_only",
+            "\n# Disk DescriptorFile\ncreateType=\"monolithicFlat\"\n\
+             RW 2048 FLAT \"disk-flat.vmdk\" 0\n",
+        ),
+    ] {
+        let path = tmp_path(&format!("desc_{name}"));
+        std::fs::write(&path, text).unwrap();
+        match VmdkReader::open(&path) {
+            Err(vmdk::Error::Unsupported(msg)) => {
+                assert!(msg.contains("monolithicFlat"), "{name}: got {msg:?}")
+            }
+            Err(other) => {
+                panic!("{name}: a real descriptor file, expected Unsupported, got {other}")
+            }
+            Ok(_) => panic!("{name}: opened a flat descriptor"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // What a read-only open asks of its device
 // ---------------------------------------------------------------------------

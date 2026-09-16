@@ -147,7 +147,7 @@ fn parse_kv(line: &str, key: &str) -> Option<String> {
 }
 
 /// Parse `RW 2048 SPARSE "image.vmdk"` style line.
-fn parse_extent(line: &str) -> Option<Extent> {
+pub(crate) fn parse_extent(line: &str) -> Option<Extent> {
     let mut parts = line.split_whitespace();
     let access = parts.next()?;
     if !matches!(access, "RW" | "RDONLY" | "NOACCESS") {
