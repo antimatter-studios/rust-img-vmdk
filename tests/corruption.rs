@@ -17,10 +17,11 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
-
 use vmdk::header::{HEADER_SIZE, MAGIC};
 use vmdk::{Error, VmdkReader};
+
+mod common;
+use common::{patch, TempPath};
 
 const SECTOR: u64 = 512;
 const CAPACITY_SECTORS: u64 = 2048; // 1 MiB
@@ -42,36 +43,9 @@ const OFF_DESC_OFFSET: u64 = vmdk::header::offsets::DESCRIPTOR_OFFSET as u64;
 const OFF_DESC_SIZE: u64 = vmdk::header::offsets::DESCRIPTOR_SIZE as u64;
 const OFF_GD_OFFSET: u64 = vmdk::header::offsets::GD_OFFSET as u64;
 
+/// Self-deleting, so a panicking assertion leaves nothing behind.
 fn tmp_path(name: &str) -> TempPath {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "vmdk_corrupt_{}_{n}_{name}.vmdk",
-        std::process::id()
-    ));
-    TempPath(p)
-}
-
-/// RAII temp-file path: removes the backing file on drop so a panicking
-/// assertion can't leak fixtures into the temp dir across CI runs.
-struct TempPath(PathBuf);
-impl std::ops::Deref for TempPath {
-    type Target = std::path::Path;
-    fn deref(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-impl AsRef<std::path::Path> for TempPath {
-    fn as_ref(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+    TempPath::new(&format!("corrupt_{name}"))
 }
 
 fn build_header() -> [u8; HEADER_SIZE] {
@@ -131,16 +105,6 @@ fn build_valid(path: &std::path::Path) {
 fn write_at(f: &mut File, off: u64, buf: &[u8]) {
     f.seek(SeekFrom::Start(off)).unwrap();
     f.write_all(buf).unwrap();
-}
-
-fn patch(path: &std::path::Path, off: u64, bytes: &[u8]) {
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .unwrap();
-    write_at(&mut f, off, bytes);
-    f.flush().unwrap();
 }
 
 #[test]

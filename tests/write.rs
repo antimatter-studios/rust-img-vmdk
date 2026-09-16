@@ -13,7 +13,7 @@
 //!    the GT entry).
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use fs_core::{BlockDevice, BlockRead, FileDevice};
@@ -23,7 +23,7 @@ use vmdk::header::{
 use vmdk::VmdkReader;
 
 mod common;
-use common::{patch, TempPath};
+use common::{patch, TempPath, WriteAt};
 
 /// Self-deleting, so a panicking assertion leaves nothing behind.
 fn tmp_path(name: &str) -> TempPath {
@@ -42,16 +42,6 @@ const DESC_SIZE_SECTORS: u64 = 1;
 const GD_OFF_SECTOR: u64 = 2;
 const GT_OFF_SECTOR: u64 = 3;
 const GRAIN0_OFF_SECTOR: u64 = 7;
-
-trait WriteAt {
-    fn write_all_at(&mut self, buf: &[u8], offset: u64) -> std::io::Result<()>;
-}
-impl WriteAt for File {
-    fn write_all_at(&mut self, buf: &[u8], offset: u64) -> std::io::Result<()> {
-        self.seek(SeekFrom::Start(offset))?;
-        self.write_all(buf)
-    }
-}
 
 fn build_header() -> [u8; HEADER_SIZE] {
     let mut h = [0u8; HEADER_SIZE];
@@ -357,8 +347,6 @@ fn on_device_round_trip_reads_match_path_open() {
     // Read-only on-device: writes must error.
     let err = r.write_at(0, &[1u8; 8]);
     assert!(matches!(err, Err(vmdk::Error::ReadOnly)));
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -402,8 +390,6 @@ fn write_into_allocated_grain_is_writethrough() {
         GRAIN0_OFF_SECTOR as u32,
         "write-through must not relocate an allocated grain"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -449,8 +435,6 @@ fn write_into_sparse_grain_allocates_and_updates_gt() {
         new_grain_sector as u64 >= end_of_grain0_sector,
         "new grain must land past existing data; got sector {new_grain_sector}"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -499,8 +483,6 @@ fn multi_grain_write_spans_allocated_and_sparse() {
     );
     let g1 = read_grain_sector_value(&path, GT_OFF_SECTOR as u32, 1);
     assert!(g1 >= (GRAIN0_OFF_SECTOR + GRAIN_SIZE) as u32);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -563,8 +545,6 @@ fn write_into_grain_with_unallocated_gt_allocates_table_too() {
         new_grain_for_first_entry > 0,
         "newly allocated GT entry [0] must point at the new grain"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -640,8 +620,6 @@ fn write_into_a_zeroed_grain_allocates_rather_than_overwriting_the_descriptor() 
         entry > GRAIN0_OFF_SECTOR as u32,
         "the marker must be replaced by a freshly allocated grain, got {entry}"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A descriptor sector whose `CID=` line carries `cid` verbatim.
@@ -878,7 +856,6 @@ fn concurrent_writers_into_one_unallocated_grain_table_all_survive() {
             );
         }
         drop(r);
-        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -934,7 +911,6 @@ fn concurrent_writers_into_one_sparse_grain_all_survive() {
             );
         }
         drop(r);
-        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -975,8 +951,6 @@ fn a_write_updates_both_copies_of_the_grain_table() {
     let mut got = [0u8; 4096];
     r.read_at(3 * GRAIN_SIZE * SECTOR, &mut got).unwrap();
     assert_eq!(got, payload);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A grain table this crate allocates has to appear in *both*
@@ -1016,8 +990,6 @@ fn an_allocated_grain_table_appears_in_both_directories() {
         &read_grain_table(&path, primary_gt),
         &read_grain_table(&path, redundant_gt),
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The redundant directory is not consulted on the read path, so an
@@ -1041,8 +1013,6 @@ fn an_unreachable_redundant_directory_reads_but_refuses_to_open_rw() {
         format!("{err}").contains("redundant grain directory"),
         "the refusal must name the redundant directory, got {err}"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,8 +1028,6 @@ fn open_readonly_rejects_writes() {
     let r = VmdkReader::open(&path).unwrap();
     let err = r.write_at(0, &[1u8; 4]);
     assert!(matches!(err, Err(vmdk::Error::ReadOnly)));
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,8 +1043,6 @@ fn open_rw_on_device_refuses_readonly_inner() {
     let dev = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn BlockDevice>;
     let err = VmdkReader::open_rw_on_device(dev);
     assert!(matches!(err, Err(vmdk::Error::ReadOnly)));
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The same refusal, observed from where the header's promise is made:
@@ -1168,8 +1134,6 @@ fn the_unclean_shutdown_marker_stands_between_a_write_and_a_flush() {
     let mut got = [0u8; 512];
     r.read_at(0, &mut got).unwrap();
     assert_eq!(got, [0x11u8; 512]);
-
-    let _ = std::fs::remove_file(&path);
 }
 
 fn unclean_byte(path: &std::path::Path) -> u8 {
