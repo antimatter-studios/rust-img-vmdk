@@ -4,7 +4,6 @@ Notable changes to `am-img-vmdk`, newest first. This is a `0.x` crate, so the
 **minor** is the compatibility boundary: a minor bump may break API, a patch
 never does.
 
-
 ## [Unreleased]
 
 ### Fixed
@@ -72,9 +71,6 @@ never does.
   written, so an image this crate crashed halfway through was
   byte-indistinguishable from one it closed cleanly. It is raised before
   a write and lowered by a clean `flush`.
-
-### Fixed
-
 - **A split-sparse extent is unsupported, not corrupt.** Each extent of a
   split disk carries a sparse header whose descriptor region is reserved
   and left empty, because the descriptor lives in the sidecar `.vmdk`.
@@ -84,9 +80,6 @@ never does.
   refusal to trust the disk; the other says to use a different reader —
   so an empty descriptor region is now read as the positive signal it is.
   A region with *content* that fails to parse is still `Corrupt`.
-
-### Fixed
-
 - **A sparse-extent revision this crate cannot read is refused by its
   version.** The header's format revision was parsed and never compared
   to anything, so an image declaring any revision at all was read with
@@ -102,14 +95,6 @@ never does.
   test — the same wrong verdict the flat layouts used to get, by a
   different route. The descriptor parser has carried a stable
   `vmfsSparse` message all along that nothing could reach.
-
-### Added
-
-- `SparseHeader::has_redundant_grain_directory`.
-- `header::SUPPORTED_VERSIONS` and `header::MAGIC_VMFS_SPARSE`.
-
-### Fixed
-
 - **A one-sector write no longer allocates whatever `num_gtes_per_gt`
   asks for.** The read path bounds a grain table against the file before
   loading it; the write path *creates* one, so nothing preceded it, and
@@ -118,7 +103,6 @@ never does.
   512-byte write into a 69,120-byte image produced a 67,243,520-byte file
   and a 64 MiB zero buffer. The field is now capped at parse time, which
   covers both paths.
-
 - **A flat or split VMDK is refused by its create type, not denied to be
   a VMDK.** The file a user is handed for `monolithicFlat`,
   `twoGbMaxExtentFlat` or `twoGbMaxExtentSparse` is a few hundred bytes
@@ -129,9 +113,6 @@ never does.
   now reads the head of the file first and, when it is a descriptor,
   returns `Unsupported` naming the create type. Only a file that is
   neither a sparse extent nor a parseable descriptor is `NotVmdk`.
-
-### Fixed
-
 - **Writes keep the redundant grain directory in step with the primary.**
   A sparse VMDK carries a second copy of the grain directory and of every
   grain table — `rgd_offset`, announced by bit 1 of `flags`, and present
@@ -142,19 +123,6 @@ never does.
   tables — and the fallback read those tables exist for then returned a
   hole where the data was. A grain table this crate allocated was worse
   than stale: it was missing from the redundant directory entirely.
-
-### Changed
-
-- `open_rw` refuses an image whose redundant grain directory does not fit
-  inside the file. A read-only open still succeeds, since reads never
-  consult it.
-
-### Added
-
-- The `FLAG_REDUNDANT_GRAIN_TABLE` constant.
-
-### Fixed
-
 - **Concurrent writes no longer lose data while reporting success.**
   Every structure had its own lock and none was held across the
   test-then-allocate-then-publish sequence that allocation is, so two
@@ -167,9 +135,6 @@ never does.
 - **The grain-table cache is keyed by the table, not the slot.** It
   recorded which directory *index* was cached, so an update meant for
   one table could be applied to a different table's cached contents.
-
-### Fixed
-
 - **A zeroed grain reads as zeros, not as the descriptor.** A grain-table
   entry of `1` is the format's zeroed-grain marker — "present and entirely
   zero" — announced by bit 2 of the header's `flags`. That flags word was
@@ -186,9 +151,18 @@ never does.
 
 ### Added
 
+- `SparseHeader::has_redundant_grain_directory`.
+- `header::SUPPORTED_VERSIONS` and `header::MAGIC_VMFS_SPARSE`.
+- The `FLAG_REDUNDANT_GRAIN_TABLE` constant.
 - `SparseHeader::uses_zeroed_grain_marker`, plus the `FLAG_ZEROED_GRAIN`
   and `GTE_ZEROED_GRAIN` constants that name the two halves of the
   convention.
+
+### Changed
+
+- `open_rw` refuses an image whose redundant grain directory does not fit
+  inside the file. A read-only open still succeeds, since reads never
+  consult it.
 
 ## [0.3.5] — 2026-09-06
 
@@ -255,16 +229,14 @@ never does.
 ### Added
 
 - Device-backed reader and the `monolithicSparse` write path.
-
-### Added
-
 - Release-on-tag pipeline using trusted publishing, and CI (test, fmt, clippy).
 
 ### Changed
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.1...v0.3.2
