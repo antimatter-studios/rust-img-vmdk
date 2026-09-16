@@ -1180,3 +1180,109 @@ fn unclean_byte(path: &std::path::Path) -> u8 {
     f.read_exact(&mut b).unwrap();
     b[0]
 }
+
+/// A device that parks the first grain-sized data write until released,
+/// so a test can act while a `write_at` is in flight.
+struct StallingDevice {
+    inner: Arc<dyn BlockDevice>,
+    armed: std::sync::atomic::AtomicBool,
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl BlockRead for StallingDevice {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        self.inner.size_bytes()
+    }
+}
+
+impl BlockDevice for StallingDevice {
+    fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+        use std::sync::atomic::Ordering;
+        if offset >= GRAIN0_OFF_SECTOR * SECTOR && self.armed.swap(false, Ordering::SeqCst) {
+            self.entered.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+        }
+        self.inner.write_at(offset, buf)
+    }
+    fn flush(&self) -> fs_core::Result<()> {
+        self.inner.flush()
+    }
+    fn is_writable(&self) -> bool {
+        self.inner.is_writable()
+    }
+}
+
+/// A flush lowers `uncleanShutdown`, which says "the writes are
+/// complete". It took only the marker's own mutex, so a flush concurrent
+/// with a write lowered the marker while the write was still running,
+/// and a crash then left a half-written image byte-identical to a clean
+/// one. A flush must wait for writes in flight. See #68.
+#[test]
+fn a_flush_does_not_lower_the_marker_under_a_write_in_flight() {
+    let path = tmp_path("flush_race");
+    let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let dev = Arc::new(StallingDevice {
+        inner: Arc::new(FileDevice::open_rw(&path).unwrap()),
+        armed: std::sync::atomic::AtomicBool::new(true),
+        entered: entered_tx,
+        release: std::sync::Mutex::new(release_rx),
+    });
+    let r = Arc::new(VmdkReader::open_rw_on_device(dev).unwrap());
+
+    // Grain 0 is allocated, so this is a write-through that parks inside
+    // the device with the marker already raised.
+    let writer = {
+        let r = Arc::clone(&r);
+        std::thread::spawn(move || r.write_at(0, &[0x42u8; 512]))
+    };
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the write reached the device");
+    assert_eq!(
+        unclean_byte(&path),
+        1,
+        "the marker is up while the write runs"
+    );
+
+    let flusher = {
+        let r = Arc::clone(&r);
+        std::thread::spawn(move || r.flush())
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while !flusher.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        unclean_byte(&path),
+        1,
+        "a flush lowered the unclean marker while a write was still in flight"
+    );
+    assert!(
+        !flusher.is_finished(),
+        "a flush returned before the write in flight had finished"
+    );
+
+    release_tx.send(()).unwrap();
+    writer.join().unwrap().expect("the write completes");
+    flusher.join().unwrap().expect("the flush completes");
+    assert_eq!(
+        unclean_byte(&path),
+        0,
+        "the flush lowers the marker once the write is done"
+    );
+
+    let mut got = [0u8; 512];
+    VmdkReader::open(&path)
+        .unwrap()
+        .read_at(0, &mut got)
+        .unwrap();
+    assert_eq!(got, [0x42u8; 512]);
+}
