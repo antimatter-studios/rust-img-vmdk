@@ -1260,8 +1260,12 @@ fn describe_descriptor_file(dev: &Arc<dyn BlockRead>, dev_size: u64) -> Error {
         return Error::NotVmdk;
     }
     let mut bytes = vec![0u8; dev_size as usize];
-    if dev.read_at(0, &mut bytes).is_err() {
-        return Error::NotVmdk;
+    // A failed read determined nothing about the bytes, so it is reported
+    // as the I/O error it is — not as "not a VMDK", which would discard
+    // the cause and tell a probing caller to move on (#69). Non-UTF-8
+    // content below is a real verdict and stays `NotVmdk`.
+    if let Err(e) = dev.read_at(0, &mut bytes) {
+        return fs_core_to_vmdk_error(e);
     }
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return Error::NotVmdk;

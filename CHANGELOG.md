@@ -9,6 +9,10 @@ never does.
 
 ### Fixed
 
+- **A failed read of a descriptor-sized file is an I/O error.** It was
+  reported as `NotVmdk` ("magic mismatch"), discarding the device's error
+  and telling a caller probing several formats to move on when nothing
+  had been determined.
 - **`vmdk_open_rw_on_device` no longer promises `FS_CORE_READ_ONLY`.** It
   returns a pointer and `fs_core.h` has no error-code accessor, so the
   code could never be observed. The header and doc now describe the
