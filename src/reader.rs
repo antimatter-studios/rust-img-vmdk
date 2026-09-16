@@ -576,6 +576,18 @@ impl VmdkReader {
             // metadata is refused when it is used; it is not a region to
             // protect.
             if end <= dev_size && !fixed_metadata.overlaps(start, end) {
+                // TWO ENTRIES, ONE TABLE (review on #100). `insert` merges,
+                // so a second entry naming storage an earlier one already
+                // names would be silently folded in, and a write through
+                // either index would then rewrite the other's mapping. A
+                // read never writes a table, so only a writable open is
+                // refused. Distinct directories name distinct copies, so any
+                // overlap at all is corruption.
+                if writable.is_some() && grain_tables.overlaps(start, end) {
+                    return Err(Error::Corrupt(
+                        "grain tables overlap: two directory entries name the same storage",
+                    ));
+                }
                 grain_tables.insert(start, end);
             }
         }
