@@ -145,12 +145,12 @@ mod tests {
     /// test's fixture, and must not fail it.
     #[test]
     fn probes_left_by_other_runs_do_not_fail_the_drop_test() {
+        // Both names are unique to this process, so binaries running
+        // this test side by side never plant or remove each other's.
         let dir = std::env::temp_dir();
-        let _foreign = TempPath(dir.join("vmdk_drop_probe_0_0.vmdk"));
-        let _reused_pid = TempPath(dir.join(format!(
-            "vmdk_drop_probe_{}_4000000000.vmdk",
-            std::process::id()
-        )));
+        let pid = std::process::id();
+        let _foreign = TempPath(dir.join(format!("vmdk_drop_probe_0_{pid}.vmdk")));
+        let _reused_pid = TempPath(dir.join(format!("vmdk_drop_probe_{pid}_4000000000.vmdk")));
         std::fs::write(&_foreign.0, b"x").expect("plant a foreign probe");
         std::fs::write(&_reused_pid.0, b"x").expect("plant a same-pid probe");
 
