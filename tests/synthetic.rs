@@ -617,3 +617,63 @@ fn a_read_only_open_refuses_to_write() {
         Err(e) => panic!("a write to a read-only open gave {e:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Contiguous grains are one device read (#43)
+// ---------------------------------------------------------------------------
+
+/// Grains laid out back to back on the host are read in one device read,
+/// and a gap -- an unallocated grain, or a grain that does not continue
+/// the host range -- ends the run.
+///
+/// `read_at` issued one read per grain however the grains lay, so a
+/// converted image, whose grains are contiguous, cost one `pread` per
+/// 64 KiB. Layout here: grains 0-1 contiguous at sectors 7 and 135,
+/// grain 2 unallocated, grains 3-4 at 263 and 391, and grain 5 at 647.
+/// Grain 3 continues grain 1's HOST range across the unallocated grain,
+/// and grain 5 is adjacent to grain 4 in the buffer but not on the host;
+/// joining either would read the wrong bytes into place. Three runs, so
+/// three reads; one per grain was five (measured on `main`).
+#[test]
+fn contiguous_grains_are_read_in_one_device_read() {
+    let grain = (GRAIN_SIZE * SECTOR) as usize;
+    let path = tmp_path("coalesced");
+    build_vmdk(&path, true, &vec![0xA0u8; grain]);
+    let layout: [(usize, u32); 5] = [(0, 7), (1, 135), (3, 263), (4, 391), (5, 647)];
+    for (gte, sector) in layout {
+        common::patch(&path, gte_offset(gte), &sector.to_le_bytes());
+        common::patch(
+            &path,
+            u64::from(sector) * SECTOR,
+            &vec![0xA0 + gte as u8; grain],
+        );
+    }
+
+    let file: Arc<dyn fs_core::BlockRead> = Arc::new(fs_core::FileDevice::open(&path).unwrap());
+    let counter = Arc::new(fs_core::CountingDevice::new(file));
+    let r = VmdkReader::open_on_device(counter.clone() as Arc<dyn fs_core::BlockRead>).unwrap();
+
+    // Starts and ends mid-grain, so the run's edges are partial grains.
+    let (start, len) = (100usize, 6 * grain - 200);
+    let mut buf = vec![0xFFu8; len];
+    // Load the grain table first, so only the grains' reads are counted.
+    r.read_at(0, &mut [0u8; 1]).unwrap();
+    counter.reset();
+    r.read_at(start as u64, &mut buf).unwrap();
+
+    let mut want = Vec::with_capacity(6 * grain);
+    for g in 0..6u8 {
+        let fill = if g == 2 { 0 } else { 0xA0 + g };
+        want.extend(std::iter::repeat_n(fill, grain));
+    }
+    assert!(
+        buf == want[start..start + len],
+        "the bytes read back were not the grains' (first mismatch at {:?})",
+        buf.iter().zip(&want[start..]).position(|(a, b)| a != b)
+    );
+    assert_eq!(
+        counter.reads(),
+        3,
+        "three host runs should be three device reads"
+    );
+}

@@ -683,10 +683,20 @@ impl VmdkReader {
         }
 
         // Walk grain by grain. Each grain either: (a) has a host
-        // location (gd[gt] != 0 and gt[gte] != 0) → read straight from
-        // disk, or (b) is unallocated → fill destination with zero.
+        // location (gd[gt] != 0 and gt[gte] != 0) → read from disk, or
+        // (b) is unallocated → fill destination with zero.
+        //
+        // ONE DEVICE READ PER RUN, NOT PER GRAIN (#43). Grains a writer
+        // laid out back to back -- which is what a converted image is --
+        // are one contiguous host range, and reading them grain by grain
+        // was one `pread` per 64 KiB. A present grain whose host bytes
+        // continue the pending run extends it; anything else reads the
+        // run out first. Each grain's pointer is still validated on its
+        // own before it joins.
         let mut cursor = offset;
         let mut written: usize = 0;
+        // (host offset, start in `buf`, length) of reads not yet issued.
+        let mut run: Option<(u64, usize, usize)> = None;
 
         while cursor < end {
             let GrainAddress {
@@ -695,29 +705,52 @@ impl VmdkReader {
                 gte_idx,
                 chunk_len,
             } = self.grain_address(cursor, end);
-            let dst = &mut buf[written..written + chunk_len];
             let gt_sector = self.gd_entry(gt_idx)?;
-
-            if gt_sector == 0 {
+            let state = if gt_sector == 0 {
                 // Whole grain table unallocated — region reads as zero.
-                dst.fill(0);
+                GrainState::Unallocated
             } else {
-                let entry = self.lookup_grain(gt_idx, gte_idx, gt_sector)?;
-                match self.grain_state(entry) {
-                    GrainState::Unallocated | GrainState::Zeroed => dst.fill(0),
-                    GrainState::At(grain_sector) => {
-                        let host_off =
-                            self.grain_host_offset(grain_sector, in_grain, chunk_len as u64)?;
-                        self.dev_read(host_off, dst)?;
+                self.grain_state(self.lookup_grain(gt_idx, gte_idx, gt_sector)?)
+            };
+
+            match state {
+                GrainState::Unallocated | GrainState::Zeroed => {
+                    if let Some(pending) = run.take() {
+                        self.read_run(buf, pending)?;
                     }
+                    buf[written..written + chunk_len].fill(0);
+                }
+                GrainState::At(grain_sector) => {
+                    let host_off =
+                        self.grain_host_offset(grain_sector, in_grain, chunk_len as u64)?;
+                    run = match run {
+                        Some((at, from, len)) if at + len as u64 == host_off => {
+                            Some((at, from, len + chunk_len))
+                        }
+                        other => {
+                            if let Some(pending) = other {
+                                self.read_run(buf, pending)?;
+                            }
+                            Some((host_off, written, chunk_len))
+                        }
+                    };
                 }
             }
 
             cursor += chunk_len as u64;
             written += chunk_len;
         }
+        if let Some(pending) = run {
+            self.read_run(buf, pending)?;
+        }
 
         Ok(())
+    }
+
+    /// Issue one pending run of [`Self::read_at`]: `len` bytes from host
+    /// offset `at` into `buf[from..]`.
+    fn read_run(&self, buf: &mut [u8], (at, from, len): (u64, usize, usize)) -> Result<()> {
+        self.dev_read(at, &mut buf[from..from + len])
     }
 
     /// Where a byte offset falls in the grain hierarchy, and how much
