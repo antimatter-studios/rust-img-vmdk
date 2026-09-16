@@ -50,8 +50,13 @@ pub unsafe extern "C" fn vmdk_open_on_device(inner: *mut FsCoreDevice) -> *mut F
 }
 
 /// Read-write variant of [`vmdk_open_on_device`]. The input device must
-/// report `is_writable()`; otherwise the open fails with
-/// `FS_CORE_READ_ONLY` and the input is freed.
+/// report `is_writable()`; otherwise the open returns NULL, the input is
+/// freed, and `fs_core_last_error_message()` says the backing device is
+/// not writable.
+///
+/// No error *code* is available: this returns a pointer, and
+/// `fs_core.h`'s only error accessor is the message. `FS_CORE_READ_ONLY`
+/// is what the device operations return, not this constructor.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vmdk_open_rw_on_device(inner: *mut FsCoreDevice) -> *mut FsCoreDevice {
     unsafe { open_on_device(inner, true) }
@@ -79,6 +84,17 @@ unsafe fn open_on_device(inner: *mut FsCoreDevice, writable: bool) -> *mut FsCor
         };
         match reader {
             Ok(r) => FsCoreDevice::into_handle(Arc::new(r)),
+            // At open time nothing has been opened read-only yet, so the
+            // one cause of `ReadOnly` here is the caller's own device.
+            // `Error::ReadOnly`'s message has to cover both causes; this
+            // one can name the right one (#85).
+            Err(crate::Error::ReadOnly) if writable => {
+                set_last_error(
+                    "backing device is not writable: vmdk_open_rw_on_device needs an \
+                     input device that accepts writes",
+                );
+                ptr::null_mut()
+            }
             Err(e) => {
                 set_last_error(e.to_string());
                 ptr::null_mut()
