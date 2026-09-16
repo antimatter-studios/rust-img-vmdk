@@ -1325,3 +1325,86 @@ fn a_flush_does_not_lower_the_marker_under_a_write_in_flight() {
         .unwrap();
     assert_eq!(got, [0x42u8; 512]);
 }
+
+// ---------------------------------------------------------------------------
+// Flushes are ordering barriers, not per-grain durability (#42)
+// ---------------------------------------------------------------------------
+
+/// Counts `flush` calls through to a file.
+struct CountingFlushes {
+    inner: FileDevice,
+    flushes: std::sync::atomic::AtomicUsize,
+}
+
+impl BlockRead for CountingFlushes {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        BlockRead::size_bytes(&self.inner)
+    }
+}
+
+impl BlockDevice for CountingFlushes {
+    fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+        self.inner.write_at(offset, buf)
+    }
+    fn flush(&self) -> fs_core::Result<()> {
+        self.flushes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.flush()
+    }
+    fn is_writable(&self) -> bool {
+        self.inner.is_writable()
+    }
+}
+
+/// A write issues only the device flushes its crash-safety order needs:
+/// none for a write into grains that already exist, and one per
+/// allocated grain -- between its data and the grain-table entry that
+/// publishes it.
+///
+/// Every grain paid a flush after its write-through and another after
+/// its grain-table entry, and on a `FileDevice` a flush is an fsync --
+/// `F_FULLFSYNC` on macOS. Measured on `main` for the writes below: 1
+/// flush for one grain written through, 30 for fifteen grains allocated.
+/// The caller's own `flush` is what makes the last writes durable.
+#[test]
+fn a_write_flushes_only_where_the_ordering_needs_it() {
+    let path = tmp_path("flush_barriers");
+    let grain = (GRAIN_SIZE * SECTOR) as usize;
+    build_grain0_only(&path, &vec![0x11u8; grain]);
+    let dev = Arc::new(CountingFlushes {
+        inner: FileDevice::open_rw(&path).unwrap(),
+        flushes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let r = VmdkReader::open_rw_on_device(dev.clone()).unwrap();
+    // The session's first write raises the unclean marker and bumps the
+    // content id; those flushes are not what this counts.
+    r.write_at(0, &[0x11]).unwrap();
+    let count = || dev.flushes.swap(0, std::sync::atomic::Ordering::SeqCst);
+    count();
+
+    r.write_at(0, &vec![0x22u8; grain]).unwrap();
+    assert_eq!(
+        count(),
+        0,
+        "a write into an allocated grain flushed the device"
+    );
+
+    let sparse = 15 * grain;
+    r.write_at(grain as u64, &vec![0x33u8; sparse]).unwrap();
+    assert_eq!(
+        count(),
+        15,
+        "fifteen allocated grains should cost one ordering flush each"
+    );
+
+    r.flush().unwrap();
+    drop(r);
+    let r = VmdkReader::open(&path).unwrap();
+    let mut back = vec![0u8; 16 * grain];
+    r.read_at(0, &mut back).unwrap();
+    assert!(back[..grain].iter().all(|&b| b == 0x22));
+    assert!(back[grain..].iter().all(|&b| b == 0x33));
+}

@@ -29,10 +29,18 @@
 //! before the grain is allocated. Crash-safety order:
 //!
 //!   grain data → grain-table entry → grain-directory entry (when growing)
-//!   → device flush
 //!
-//! with `dev.flush()` between each step. A crash mid-allocation may leak
-//! a grain or grain table but never produces a wrong-data read.
+//! A crash mid-allocation may leak a grain or grain table but never
+//! produces a wrong-data read.
+//!
+//! A device flush is an fsync -- `F_FULLFSYNC` on macOS -- so it is
+//! issued only where that order depends on it (#42): after a new grain's
+//! data and before the entry that points at it, after a zeroed table and
+//! before the directory entry that points at it, and between a redundant
+//! entry and the primary one it leads. A write into a grain that already
+//! exists publishes nothing and issues none, and neither does the last
+//! entry of an allocation: [`VmdkReader::flush`] is the caller's
+//! durability barrier.
 //!
 //! ## What a write records about itself
 //!
@@ -893,7 +901,9 @@ impl VmdkReader {
     ///
     /// Crash-safety order:
     ///   grain data → grain-table entry → grain-directory entry (when
-    ///   growing) → flush, with `dev.flush()` between each step.
+    ///   growing), with a device flush only where a later step depends on
+    ///   an earlier one being durable; see the module doc. Call
+    ///   [`VmdkReader::flush`] for durability.
     pub fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         if !self.is_writable() {
             return Err(Error::ReadOnly);
@@ -966,11 +976,12 @@ impl VmdkReader {
         })
     }
 
+    /// No flush: nothing is published, so there is nothing to order the
+    /// write against, and durability is the caller's `flush` (#42).
     fn write_through(&self, grain_sector: u32, addr: &GrainAddress, src: &[u8]) -> Result<()> {
         let host_off =
             self.grain_host_offset(grain_sector, addr.in_grain, addr.chunk_len as u64)?;
-        self.dev_write(host_off, src)?;
-        self.dev_flush()
+        self.dev_write(host_off, src)
     }
 
     /// Give this grain a home and land `src` in it.
@@ -1298,8 +1309,9 @@ impl VmdkReader {
             self.dev_flush()?;
         }
 
+        // No flush after the primary entry: nothing later depends on it
+        // being durable first, and the caller's `flush` makes it so (#42).
         self.dev_write((gt_sector as u64) * SECTOR_SIZE + entry_within, &bytes)?;
-        self.dev_flush()?;
 
         let mut cache = self.gt_cache.lock().unwrap();
         if cache.loaded == Some((gt_idx, gt_sector)) && gte_idx < cache.entries.len() {
