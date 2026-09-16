@@ -179,6 +179,9 @@ pub struct VmdkReader {
     /// names a sector never changes afterwards, because grains are never
     /// relocated.
     allocation: Mutex<()>,
+    /// Grain tables whose redundant copy this session has already merged
+    /// the primary into; see [`VmdkReader::redundant_gt_sector`].
+    redundant_merged: Mutex<std::collections::HashSet<usize>>,
     /// First byte a grain may legally occupy: `over_head`, the format's
     /// own statement of how much metadata precedes the grains. See
     /// [`VmdkReader::grain_host_offset`].
@@ -614,6 +617,7 @@ impl VmdkReader {
             writable,
             alloc_cursor: Mutex::new(alloc_cursor),
             allocation: Mutex::new(()),
+            redundant_merged: Mutex::new(std::collections::HashSet::new()),
             first_grain_byte,
             fixed_metadata,
             grain_tables: RwLock::new(grain_tables),
@@ -1259,10 +1263,13 @@ impl VmdkReader {
             *dir.get(gt_idx)
                 .ok_or(Error::Corrupt("gt_idx past redundant grain directory"))?
         };
+        let len = (self.grain_table_sectors() * SECTOR_SIZE) as usize;
+        let mut merged = self.redundant_merged.lock().unwrap();
         if existing != 0 {
             // Written to without any check, so an entry naming sector 1
             // put four bytes of a sector number over the descriptor
-            // (#64). The same two bounds the primary table gets.
+            // (#64). The same two bounds the primary table gets, checked
+            // before the merge below reads and rewrites the whole table.
             let off = (existing as u64) * SECTOR_SIZE;
             let end = off + self.grain_table_sectors() * SECTOR_SIZE;
             if end > self.file_extent() {
@@ -1273,17 +1280,63 @@ impl VmdkReader {
                     "redundant grain table overlaps the image's metadata",
                 ));
             }
+            if !merged.contains(&gt_idx) {
+                self.merge_primary_into_redundant(primary_gt_sector, existing, len)?;
+                merged.insert(gt_idx);
+            }
             return Ok(Some(existing));
         }
 
         let sector = self.allocate_blank_grain_table()?;
-        let len = (self.grain_table_sectors() * SECTOR_SIZE) as usize;
         let mut primary = vec![0u8; len];
         self.dev_read((primary_gt_sector as u64) * SECTOR_SIZE, &mut primary)?;
         self.dev_write((sector as u64) * SECTOR_SIZE, &primary)?;
         self.dev_flush()?;
         self.publish_directory_entry(rgd, self.header.rgd_offset, gt_idx, sector)?;
+        merged.insert(gt_idx);
         Ok(Some(sector))
+    }
+
+    /// Fill every entry the redundant table lacks and the primary has.
+    ///
+    /// A redundant table can exist and be incomplete: this crate at
+    /// 0.3.5 and earlier published redundant directory entries without
+    /// keeping their tables in step, and so may any other producer. Used
+    /// as-is, the first new entry mirrored into such a table left it
+    /// claiming that grain and denying every older one, so a recovery
+    /// tool falling back to it read holes where live data is (#65).
+    ///
+    /// A MERGE, NOT A COPY. The redundant table is written first on every
+    /// update, so after a crash it may legitimately hold entries the
+    /// primary lacks; those are the recovery data the copy exists for.
+    /// Nothing nonzero in it is ever cleared or replaced. Done once per
+    /// table per session, under [`VmdkReader::redundant_merged`], because
+    /// this runs on every grain-table update.
+    fn merge_primary_into_redundant(
+        &self,
+        primary_gt_sector: u32,
+        redundant_gt_sector: u32,
+        len: usize,
+    ) -> Result<()> {
+        let mut primary = vec![0u8; len];
+        self.dev_read((primary_gt_sector as u64) * SECTOR_SIZE, &mut primary)?;
+        let mut redundant = vec![0u8; len];
+        self.dev_read((redundant_gt_sector as u64) * SECTOR_SIZE, &mut redundant)?;
+        let mut changed = false;
+        for (r, p) in redundant
+            .chunks_exact_mut(GD_GT_ENTRY_SIZE as usize)
+            .zip(primary.chunks_exact(GD_GT_ENTRY_SIZE as usize))
+        {
+            if r == [0u8; 4] && p != [0u8; 4] {
+                r.copy_from_slice(p);
+                changed = true;
+            }
+        }
+        if changed {
+            self.dev_write((redundant_gt_sector as u64) * SECTOR_SIZE, &redundant)?;
+            self.dev_flush()?;
+        }
+        Ok(())
     }
 
     /// Overwrite a single grain-table entry, in both copies of the
