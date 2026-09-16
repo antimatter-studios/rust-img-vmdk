@@ -127,7 +127,23 @@ fn states_the_link_instruction(header: &str, want: &str) -> bool {
         if !head.eq_ignore_ascii_case(PHRASE) {
             return false;
         }
-        bare[PHRASE.len()..].trim_start().starts_with(want)
+        // The name must END where `want` ends. `starts_with` alone read
+        // `Link with libvmdk.a.old` as naming `libvmdk.a` — and
+        // `libraries_named` cannot catch that line, because the token does
+        // not end in `.a`. A filename character after `want` continues the
+        // name; a `.` does too unless it closes the sentence.
+        let Some(after) = bare[PHRASE.len()..].trim_start().strip_prefix(want) else {
+            return false;
+        };
+        let mut rest = after.chars();
+        match rest.next() {
+            None => true,
+            Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '-' => false,
+            Some('.') => !rest
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_'),
+            Some(_) => true,
+        }
     })
 }
 
@@ -243,6 +259,9 @@ fn the_link_instruction_must_open_the_sentence() {
         "  # link with   libvmdk.a\n",
         " */ Link with libvmdk.a\n",
         " * unrelated first line\n * Link with libvmdk.a\n",
+        // Sentence punctuation after the name is not part of it.
+        " * Link with libvmdk.a.\n",
+        " * Link with libvmdk.a, then include this header.\n",
     ] {
         assert!(
             states_the_link_instruction(accepted, want),
@@ -259,6 +278,11 @@ fn the_link_instruction_must_open_the_sentence() {
         " * libvmdk.a was renamed in 0.4.0.\n",
         // An instruction naming a different library.
         " * Link with libfs_core.a.\n",
+        // The wanted name as a mere prefix of another filename: a linker
+        // is told to find a file cargo never builds.
+        " * Link with libvmdk.a.old\n",
+        " * Link with libvmdk.a2 alongside fs_core.h.\n",
+        " * Link with libvmdk.a_debug\n",
         // Nothing at all.
         "",
     ] {
