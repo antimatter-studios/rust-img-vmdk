@@ -103,6 +103,11 @@ pub const SECTOR_SIZE: u64 = 512;
 const GD_GT_ENTRY_SIZE: u64 = 4;
 
 pub struct VmdkReader {
+    /// The stream-optimized grain inflated last, by its host sector (#48).
+    ///
+    /// A caller reading in pieces smaller than a grain would otherwise
+    /// inflate the same 64 KiB again for every piece.
+    inflated: Mutex<Option<(u32, Arc<Vec<u8>>)>>,
     /// Backing device, as the read half. All host-offset reads go
     /// through here.
     ///
@@ -381,7 +386,37 @@ impl VmdkReader {
         let mut hdr_bytes = [0u8; HEADER_SIZE];
         dev.read_at(0, &mut hdr_bytes)
             .map_err(fs_core_to_vmdk_error)?;
-        let header = SparseHeader::parse(&hdr_bytes)?;
+        let mut header = SparseHeader::parse(&hdr_bytes)?;
+        // A STREAM-OPTIMIZED IMAGE IS NOT WRITTEN (#48). It is append-only
+        // by construction: a rewritten grain compresses to a different
+        // length and does not fit where the old one was.
+        if writable.is_some() && header.is_stream_optimized() {
+            return Err(Error::Unsupported(
+                "a stream-optimized VMDK is read-only here: its grains are compressed and \
+                 append-only, so a grain cannot be rewritten in place",
+            ));
+        }
+        // THE GRAIN DIRECTORY MAY BE IN THE FOOTER. A stream written in one
+        // pass does not know where its directory will go when it writes the
+        // header, so it says "at the end" (all ones) and repeats the header,
+        // with the real offset, one sector before the end-of-stream marker.
+        if header.is_stream_optimized() && header.gd_offset == u64::MAX {
+            let footer_at = dev_size.checked_sub(2 * SECTOR_SIZE).ok_or(Error::Corrupt(
+                "a footer-directory image too short to hold a footer",
+            ))?;
+            let mut footer = [0u8; HEADER_SIZE];
+            dev.read_at(footer_at, &mut footer)
+                .map_err(fs_core_to_vmdk_error)?;
+            let footer = SparseHeader::parse(&footer)?;
+            if footer.gd_offset == u64::MAX || !footer.is_stream_optimized() {
+                return Err(Error::Corrupt(
+                    "the header puts the grain directory in the footer, and the footer does \
+                     not say where it is",
+                ));
+            }
+            header.gd_offset = footer.gd_offset;
+            header.rgd_offset = footer.rgd_offset;
+        }
 
         // Descriptor must say monolithicSparse.
         if header.descriptor_offset == 0 || header.descriptor_size == 0 {
@@ -625,6 +660,7 @@ impl VmdkReader {
             content_id_bumped: Mutex::new(false),
             unclean_marked: Mutex::new(false),
             writes_in_flight: RwLock::new(()),
+            inflated: Mutex::new(None),
         })
     }
 
@@ -732,6 +768,15 @@ impl VmdkReader {
                     }
                     buf[written..written + chunk_len].fill(0);
                 }
+                GrainState::At(grain_sector) if self.header.is_stream_optimized() => {
+                    if let Some(pending) = run.take() {
+                        self.read_run(buf, pending)?;
+                    }
+                    let grain = self.inflated_grain(grain_sector, cursor - in_grain)?;
+                    let from = in_grain as usize;
+                    buf[written..written + chunk_len]
+                        .copy_from_slice(&grain[from..from + chunk_len]);
+                }
                 GrainState::At(grain_sector) => {
                     let host_off =
                         self.grain_host_offset(grain_sector, in_grain, chunk_len as u64)?;
@@ -801,6 +846,66 @@ impl VmdkReader {
             GTE_ZEROED_GRAIN if self.header.uses_zeroed_grain_marker() => GrainState::Zeroed,
             sector => GrainState::At(sector),
         }
+    }
+
+    /// A stream-optimized grain, inflated: the whole grain, whose virtual
+    /// start is `virtual_start`.
+    ///
+    /// At the grain's host sector is a marker -- the grain's virtual LBA
+    /// in sectors (u64) and the compressed length (u32) -- then that many
+    /// bytes of zlib. A length of zero marks a metadata record (a grain
+    /// table, the directory, the footer), which a grain-table entry must
+    /// not name. The LBA has to be this grain's: a pointer at another
+    /// grain's record would otherwise serve its bytes here. The inflated
+    /// length has to be one grain, less only for the disk's last grain.
+    fn inflated_grain(&self, grain_sector: u32, virtual_start: u64) -> Result<Arc<Vec<u8>>> {
+        if let Some((sector, grain)) = self.inflated.lock().unwrap().as_ref() {
+            if *sector == grain_sector {
+                return Ok(grain.clone());
+            }
+        }
+        const MARKER: u64 = 12;
+        let at = self.grain_host_offset(grain_sector, 0, MARKER)?;
+        let mut marker = [0u8; MARKER as usize];
+        self.dev_read(at, &mut marker)?;
+        let lba = u64::from_le_bytes(marker[..8].try_into().unwrap());
+        let size = u64::from(u32::from_le_bytes(marker[8..].try_into().unwrap()));
+        if size == 0 {
+            return Err(Error::Corrupt(
+                "a grain table entry names a metadata marker, not a compressed grain",
+            ));
+        }
+        if lba.checked_mul(SECTOR_SIZE) != Some(virtual_start) {
+            return Err(Error::Corrupt(
+                "a compressed grain's marker names a different grain than the table entry \
+                 that points at it",
+            ));
+        }
+        let payload_at = self.grain_host_offset(grain_sector, MARKER, size)?;
+        let mut compressed = vec![0u8; size as usize];
+        self.dev_read(payload_at, &mut compressed)?;
+
+        let grain_bytes = self.grain_size_bytes();
+        let expected = grain_bytes.min(self.virtual_size - virtual_start) as usize;
+        let mut grain = vec![0u8; grain_bytes as usize];
+        let mut inflate = flate2::Decompress::new(true);
+        let status = inflate
+            .decompress(&compressed, &mut grain, flate2::FlushDecompress::Finish)
+            .map_err(|_| Error::Corrupt("a compressed grain is not a valid zlib stream"))?;
+        if status != flate2::Status::StreamEnd {
+            return Err(Error::Corrupt(
+                "a compressed grain inflates past one grain, or its stream is truncated",
+            ));
+        }
+        let produced = inflate.total_out() as usize;
+        if produced < expected {
+            return Err(Error::Corrupt(
+                "a compressed grain inflates to less than one grain",
+            ));
+        }
+        let grain = Arc::new(grain);
+        *self.inflated.lock().unwrap() = Some((grain_sector, grain.clone()));
+        Ok(grain)
     }
 
     /// The host byte offset of `len` bytes at `in_grain` inside the

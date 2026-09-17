@@ -330,13 +330,165 @@ fn the_revisions_qemu_writes_are_the_revisions_we_accept() {
         raw.to_str().unwrap(),
         stream.to_str().unwrap(),
     ]);
-    match VmdkReader::open(&stream) {
-        Err(vmdk::Error::Unsupported(msg)) => assert!(
-            msg.contains("version 3"),
-            "a stream-optimized extent must be refused by its revision, got {msg:?}"
-        ),
-        Err(other) => panic!("expected Unsupported, got {other}"),
-        Ok(_) => panic!("opened a stream-optimized extent"),
+    let r = VmdkReader::open(&stream).expect("a stream-optimized extent is version 3 and readable");
+    assert_eq!(r.header().version, 3);
+    let mut buf = vec![0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, pattern(4096));
+}
+
+/// Bytes that are partly zero, so qemu leaves some grains unallocated, and
+/// partly varied, so compressed grains differ in length.
+fn stream_source() -> Vec<u8> {
+    let mut data = vec![0u8; 2 * 1024 * 1024 + 12345];
+    let mut x = 0x9E37_79B9u32;
+    for (i, byte) in data.iter_mut().enumerate() {
+        if (i / 65536) % 3 == 1 {
+            continue;
+        }
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *byte = if i % 97 < 40 {
+            (x >> 24) as u8
+        } else {
+            (i % 251) as u8
+        };
+    }
+    data
+}
+
+/// Cross-read (stream-optimized, #48): the layout inside every OVA reads
+/// back byte for byte -- whole, and in unaligned pieces that start and end
+/// inside compressed grains -- and is refused for writing.
+#[test]
+fn our_reader_matches_a_qemu_stream_optimized_image() {
+    let dir = TempDir::new("stream-read");
+    let raw = dir.join("src.raw");
+    let data = stream_source();
+    std::fs::write(&raw, &data).unwrap();
+    let stream = dir.join("stream.vmdk");
+    assert_qemu(&[
+        "convert",
+        "-f",
+        "raw",
+        "-O",
+        "vmdk",
+        "-o",
+        "subformat=streamOptimized",
+        raw.to_str().unwrap(),
+        stream.to_str().unwrap(),
+    ]);
+    assert!(
+        std::fs::metadata(&stream).unwrap().len() < data.len() as u64 / 2,
+        "fixture: the grains must actually be compressed"
+    );
+
+    let r = VmdkReader::open(&stream).unwrap();
+    assert!(r.header().is_stream_optimized());
+    let mut whole = vec![0xAAu8; data.len()];
+    r.read_at(0, &mut whole).unwrap();
+    assert!(
+        whole == data,
+        "the whole stream-optimized disk read back differently"
+    );
+    for (at, len) in [
+        (100, 5),
+        (65_530, 20),
+        (131_000, 70_000),
+        (data.len() - 7, 7),
+    ] {
+        let mut piece = vec![0xAAu8; len];
+        r.read_at(at as u64, &mut piece).unwrap();
+        assert!(piece == data[at..at + len], "piece at {at}+{len}");
+    }
+
+    match VmdkReader::open_rw(&stream) {
+        Err(vmdk::Error::Unsupported(msg)) => assert!(msg.contains("stream-optimized"), "{msg}"),
+        Err(other) => panic!("refused for the wrong reason: {other}"),
+        Ok(_) => panic!("a stream-optimized image opened for writing"),
+    }
+}
+
+/// A stream written in one pass puts its grain directory in a FOOTER: the
+/// header says "at the end" (all ones), and a copy of the header with the
+/// real offset sits before the end-of-stream marker. qemu writes the
+/// offset in place, so the variant is built from its image.
+#[test]
+fn a_stream_optimized_image_with_its_directory_in_the_footer_reads_back() {
+    let dir = TempDir::new("stream-footer");
+    let raw = dir.join("src.raw");
+    let data = stream_source();
+    std::fs::write(&raw, &data).unwrap();
+    let stream = dir.join("stream.vmdk");
+    assert_qemu(&[
+        "convert",
+        "-f",
+        "raw",
+        "-O",
+        "vmdk",
+        "-o",
+        "subformat=streamOptimized",
+        raw.to_str().unwrap(),
+        stream.to_str().unwrap(),
+    ]);
+    let mut bytes = std::fs::read(&stream).unwrap();
+    let header: Vec<u8> = bytes[..512].to_vec();
+    bytes[56..64].copy_from_slice(&u64::MAX.to_le_bytes());
+    // footer marker (size 0, type 3), footer header, end-of-stream marker
+    let mut marker = vec![0u8; 512];
+    marker[12..16].copy_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(&marker);
+    bytes.extend_from_slice(&header);
+    bytes.extend_from_slice(&[0u8; 512]);
+    let footer = dir.join("footer.vmdk");
+    std::fs::write(&footer, &bytes).unwrap();
+
+    let r = VmdkReader::open(&footer).expect("the footer names the grain directory");
+    let mut whole = vec![0u8; data.len()];
+    r.read_at(0, &mut whole).unwrap();
+    assert!(whole == data, "read through the footer's directory differs");
+}
+
+/// A grain-table entry that names something other than its own compressed
+/// grain -- a metadata marker, or another grain's record -- is corrupt, not
+/// data to inflate.
+#[test]
+fn a_grain_entry_naming_the_wrong_record_is_refused() {
+    let dir = TempDir::new("stream-wrong");
+    let raw = dir.join("src.raw");
+    let data = stream_source();
+    std::fs::write(&raw, &data).unwrap();
+    let stream = dir.join("stream.vmdk");
+    assert_qemu(&[
+        "convert",
+        "-f",
+        "raw",
+        "-O",
+        "vmdk",
+        "-o",
+        "subformat=streamOptimized",
+        raw.to_str().unwrap(),
+        stream.to_str().unwrap(),
+    ]);
+    let bytes = std::fs::read(&stream).unwrap();
+    let gd = u64::from_le_bytes(bytes[56..64].try_into().unwrap()) as usize * 512;
+    let gt = u32::from_le_bytes(bytes[gd..gd + 4].try_into().unwrap()) as usize * 512;
+    let entry =
+        |i: usize| u32::from_le_bytes(bytes[gt + 4 * i..gt + 4 * i + 4].try_into().unwrap());
+    let (first, second) = (entry(0), entry(2));
+    assert!(
+        first != 0 && second != 0,
+        "fixture: grains 0 and 2 are allocated"
+    );
+
+    let mut swapped = bytes.clone();
+    swapped[gt..gt + 4].copy_from_slice(&second.to_le_bytes());
+    let path = dir.join("swapped.vmdk");
+    std::fs::write(&path, &swapped).unwrap();
+    let r = VmdkReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 512];
+    match r.read_at(0, &mut buf) {
+        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("different grain"), "{msg}"),
+        other => panic!("grain 0 served grain 2's record: {other:?}"),
     }
 }
 

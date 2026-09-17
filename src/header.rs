@@ -49,10 +49,15 @@ pub const MAGIC_VMFS_SPARSE: u32 = 0x4457_4F43;
 /// accepting only 1 would refuse images this crate's own cross-validation
 /// suite produces.
 ///
-/// 3 is the stream-optimized revision (compressed grains, grain markers,
-/// and a footer that replaces the header at the end of the file), which
-/// is a layout this crate cannot walk.
-pub const SUPPORTED_VERSIONS: &[u32] = &[1, 2];
+/// 3 is the stream-optimized revision: compressed grains behind grain
+/// markers, and possibly a footer that replaces the header's grain
+/// directory offset. It is read -- only with `compressAlgorithm` 1, the
+/// one the format defines -- and never written (#48).
+pub const SUPPORTED_VERSIONS: &[u32] = &[1, 2, 3];
+
+/// `compressAlgorithm` for DEFLATE: each grain is a zlib stream behind a
+/// grain marker. The only compression the format defines.
+pub const COMPRESSION_DEFLATE: u16 = 1;
 
 /// What [`Error::Unsupported`] says about a revision we do not read.
 ///
@@ -62,14 +67,9 @@ pub const SUPPORTED_VERSIONS: &[u32] = &[1, 2];
 fn unsupported_version_message(version: u32) -> &'static str {
     match version {
         0 => "sparse extent version 0",
-        3 => {
-            "sparse extent version 3 — the stream-optimized revision: compressed \
-              grains, grain markers, and a footer replacing the header at the end \
-              of the file"
-        }
         _ => {
-            "sparse extent version other than 1 or 2, which are the revisions this \
-              crate reads"
+            "sparse extent version other than 1, 2 or 3, which are the revisions \
+              this crate reads"
         }
     }
 }
@@ -203,11 +203,8 @@ impl SparseHeader {
         let version = read_u32(bytes, offsets::VERSION);
         // Checked before the field-by-field tests below, because those
         // read the version-1 layout and a different revision may not
-        // have it. Refusing version 3 here rather than at the
-        // compression test below is the point of the check: the format
-        // states the stream-optimized fact twice, and resting the
-        // refusal on the second statement means an image that makes only
-        // the first one walks through.
+        // have it. Whether the revision and the compression field agree is
+        // checked with the compression field, below.
         if !SUPPORTED_VERSIONS.contains(&version) {
             return Err(Error::Unsupported(unsupported_version_message(version)));
         }
@@ -250,10 +247,29 @@ impl SparseHeader {
                 "grain table larger than any real image declares (num_gtes_per_gt out of range)",
             ));
         }
-        if compress_algorithm != 0 {
-            return Err(Error::Unsupported(
-                "compressed VMDK (compress_algorithm != 0)",
-            ));
+        // COMPRESSION AND THE REVISION STATE THE SAME FACT TWICE, and both
+        // statements have to agree: a stream-optimized (version 3) image
+        // compresses its grains, and only that revision may. Resting on
+        // either alone would let an image that makes only one of them walk
+        // through and have its compressed grains read as raw data, or its
+        // raw grains inflated.
+        match (version, compress_algorithm) {
+            (3, COMPRESSION_DEFLATE) | (1 | 2, 0) => {}
+            (3, 0) => {
+                return Err(Error::Corrupt(
+                    "a version 3 (stream-optimized) header that declares no compression",
+                ));
+            }
+            (1 | 2, COMPRESSION_DEFLATE) => {
+                return Err(Error::Corrupt(
+                    "a compressed grain layout in a header revision that does not have one",
+                ));
+            }
+            _ => {
+                return Err(Error::Unsupported(
+                    "compressed VMDK with a compression algorithm other than DEFLATE",
+                ));
+            }
         }
 
         // `flags` used to be parsed and never read, which is how the
@@ -299,6 +315,11 @@ impl SparseHeader {
     /// crate's fixtures produce sets both.
     pub fn has_redundant_grain_directory(&self) -> bool {
         self.flags & FLAG_REDUNDANT_GRAIN_TABLE != 0 && self.rgd_offset != 0
+    }
+
+    /// Whether grains are compressed: the stream-optimized layout (#48).
+    pub fn is_stream_optimized(&self) -> bool {
+        self.compress_algorithm == COMPRESSION_DEFLATE
     }
 }
 
@@ -413,14 +434,31 @@ mod tests {
         assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
     }
 
+    /// The revision and the compression field have to agree (#48):
+    /// version 3 is the stream-optimized layout and compresses with
+    /// DEFLATE, and only it does. An image stating only one of the two is
+    /// corrupt, and a compression other than DEFLATE is unsupported.
     #[test]
-    fn rejects_compressed_images() {
+    fn compression_and_revision_must_agree() {
         // compress_algorithm @ 77..79; 1 = DEFLATE (streamOptimized).
-        let mut h = valid_header();
-        h[77..79].copy_from_slice(&1u16.to_le_bytes());
-        match SparseHeader::parse(&h).unwrap_err() {
-            Error::Unsupported(_) => {}
-            other => panic!("expected Unsupported, got {other:?}"),
+        let with = |version: u32, compress: u16| {
+            let mut h = valid_header();
+            h[4..8].copy_from_slice(&version.to_le_bytes());
+            h[77..79].copy_from_slice(&compress.to_le_bytes());
+            SparseHeader::parse(&h)
+        };
+        let stream = with(3, 1).expect("version 3 with DEFLATE is stream-optimized");
+        assert!(stream.is_stream_optimized());
+        assert!(!with(1, 0).unwrap().is_stream_optimized());
+        for (version, compress) in [(1, 1), (2, 1), (3, 0)] {
+            match with(version, compress) {
+                Err(Error::Corrupt(_)) => {}
+                other => panic!("version {version}, compress {compress}: {other:?}"),
+            }
+        }
+        match with(3, 2) {
+            Err(Error::Unsupported(_)) => {}
+            other => panic!("a non-DEFLATE compression: {other:?}"),
         }
     }
 

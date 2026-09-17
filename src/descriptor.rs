@@ -74,7 +74,9 @@ impl Descriptor {
 
         let create_type = create_type.ok_or(Error::Corrupt("descriptor missing createType"))?;
 
-        if create_type != "monolithicSparse" {
+        // `streamOptimized` is a sparse extent too, with compressed grains;
+        // the header says which, and the reader checks the two agree.
+        if create_type != "monolithicSparse" && create_type != "streamOptimized" {
             // Map known variants to a stable message so callers can log.
             let msg: &'static str = match create_type.as_str() {
                 "monolithicFlat" => "monolithicFlat",
@@ -82,7 +84,6 @@ impl Descriptor {
                 "twoGbMaxExtentFlat" => "twoGbMaxExtentFlat",
                 "vmfs" => "vmfs",
                 "vmfsSparse" => "vmfsSparse",
-                "streamOptimized" => "streamOptimized",
                 "fullDevice" => "fullDevice",
                 "partitionedDevice" => "partitionedDevice",
                 _ => "unknown createType",
@@ -212,7 +213,6 @@ mod tests {
             ("twoGbMaxExtentFlat", "twoGbMaxExtentFlat"),
             ("vmfs", "vmfs"),
             ("vmfsSparse", "vmfsSparse"),
-            ("streamOptimized", "streamOptimized"),
             ("fullDevice", "fullDevice"),
             ("partitionedDevice", "partitionedDevice"),
         ] {

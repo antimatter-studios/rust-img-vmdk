@@ -20,6 +20,9 @@ qemu-validation = []
 
 [dependencies]
 am-fs-core = { path = "../rust-fs-core", version = "0.2.10" }
+# zlib inflation for stream-optimized grains (#48). The pure-Rust
+# miniz_oxide backend: MIT/Apache-2.0, and no C in the build.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 # YAML parser for tests/ci_profile.rs, which reads .github/workflows/ci.yml
