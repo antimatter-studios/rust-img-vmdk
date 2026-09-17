@@ -728,10 +728,13 @@ fn mutation(rng: &mut XorShift) -> Mutation {
 }
 
 /// Open, read and write one mutated image. Any `Ok` or `Err` is fine; a
-/// panic is what the sweep exists to find.
-fn exercise(path: &std::path::Path, rng_seed: u64) {
+/// panic is what the sweep exists to find. Returns whether the image
+/// opened read-only.
+fn exercise(path: &std::path::Path, rng_seed: u64) -> bool {
     let mut rng = XorShift(rng_seed | 1);
-    if let Ok(r) = VmdkReader::open(path) {
+    let reader = VmdkReader::open(path);
+    let opened = reader.is_ok();
+    if let Ok(r) = reader {
         let size = r.virtual_size();
         let mut buf = vec![0u8; 4096];
         let offsets = [
@@ -757,6 +760,7 @@ fn exercise(path: &std::path::Path, rng_seed: u64) {
         }
         let _ = w.flush();
     }
+    opened
 }
 
 /// OPEN, READ AND WRITE NEVER PANIC ON A MUTATED IMAGE (#51).
@@ -782,12 +786,13 @@ fn random_patches_never_panic_open_read_or_write() {
         let seed = rng.next();
         build_valid(&path);
         patch(&path, m.offset, &m.bytes);
-        if VmdkReader::open(&path).is_ok() {
-            opened += 1;
-        }
         let p: &std::path::Path = &path;
-        if std::panic::catch_unwind(|| exercise(p, seed)).is_err() {
-            panic!("iteration {i} panicked: {m:?}, exercise seed {seed:#x}");
+        // The open is inside the guard too, so a panic in the parser
+        // itself still names the iteration and the patch.
+        match std::panic::catch_unwind(|| exercise(p, seed)) {
+            Ok(true) => opened += 1,
+            Ok(false) => {}
+            Err(_) => panic!("iteration {i} panicked: {m:?}, exercise seed {seed:#x}"),
         }
     }
     // Most single-field patches still open, and those are the ones that
