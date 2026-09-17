@@ -896,9 +896,7 @@ impl VmdkReader {
         // `deflateBound` for it (the bound for any compression settings),
         // so a longer record is corrupt -- and is refused before its
         // image-controlled length becomes an allocation.
-        let bound =
-            grain_bytes + (grain_bytes >> 5) + (grain_bytes >> 7) + (grain_bytes >> 11) + 7 + 6;
-        if size > bound {
+        if size > deflate_bound(grain_bytes) {
             return Err(Error::Corrupt(
                 "a compressed grain's record is longer than any zlib stream of one grain",
             ));
@@ -1607,6 +1605,18 @@ fn descriptor_agrees_with_header(desc: &Descriptor, header: &SparseHeader) -> Re
     Ok(())
 }
 
+/// zlib's conservative `deflateBound`: no zlib stream of `len` bytes is
+/// longer, whatever the compression settings. Saturating, because
+/// `len` is a grain size the image declares and may be near `u64::MAX`,
+/// where the sum would overflow; a saturated bound only ever admits
+/// more, and the record length it is compared with is a `u32`.
+fn deflate_bound(len: u64) -> u64 {
+    len.saturating_add(len >> 5)
+        .saturating_add(len >> 7)
+        .saturating_add(len >> 11)
+        .saturating_add(7 + 6)
+}
+
 /// The same string [`Descriptor::parse`] returns for
 /// `createType="vmfsSparse"`. One layout, one message, whichever file
 /// named it — a corruption test asserts the two stay equal.
@@ -1849,7 +1859,18 @@ fn fs_core_to_vmdk_error(e: fs_core::Error) -> Error {
 
 #[cfg(test)]
 mod extents_tests {
-    use super::Extents;
+    /// The bound is zlib's for an ordinary grain, and saturates rather
+    /// than overflowing for a grain size near `u64::MAX`.
+    #[test]
+    fn deflate_bound_matches_zlib_and_saturates() {
+        // zlib's deflateBound(65536) with its conservative (non-default
+        // settings) formula: 65536 + 2048 + 512 + 32 + 7 + 6.
+        assert_eq!(deflate_bound(65_536), 68_141);
+        assert_eq!(deflate_bound(u64::MAX), u64::MAX);
+        assert_eq!(deflate_bound(u64::MAX - 13), u64::MAX);
+    }
+
+    use super::{deflate_bound, Extents};
 
     #[test]
     fn inserts_merge_and_overlap_is_half_open() {
