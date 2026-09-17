@@ -6,6 +6,17 @@ never does.
 
 ## [Unreleased]
 
+### Added
+
+- **`streamOptimized` images are read** (#48), the layout inside every
+  OVA. A grain-table entry names a marker (the grain's virtual LBA and
+  its compressed length) followed by a zlib stream, which is inflated,
+  checked to be the grain the entry is for, and kept for the next read of
+  the same grain. The grain directory comes from the header or, when the
+  header says it is at the end, from the footer. Version 3 is accepted
+  only with DEFLATE compression and compression only in version 3.
+  Writing is refused. New dependency: `flate2`, on its pure-Rust backend.
+
 ### Fixed
 
 - **Grain pointers are checked against every metadata region, not a
