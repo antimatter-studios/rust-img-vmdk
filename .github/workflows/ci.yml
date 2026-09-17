@@ -54,9 +54,64 @@ jobs:
         # variable: tests/ci_profile.rs reads this file and fails if no
         # `cargo test` in it runs without `--release` while setting this.
         # See #77.
-        run: cargo test --locked --all-targets
+        #
+        # THE OUTPUT GOES TO A FILE RATHER THAN THROUGH `tee`, and the
+        # shape is forced rather than chosen. Actions runs a `run:`
+        # block as `bash -e` with no `pipefail`, so `cargo test | tee`
+        # reports `tee`'s exit status -- a red suite would go green --
+        # and tests/ci_profile.rs refuses a run whose status is
+        # discarded for exactly that reason. A redirection is not a
+        # pipe: the status is still cargo's, `set -e` still ends the
+        # step, and the guard still counts this as the debug run that
+        # proves the build traps an overflow. The step below prints the
+        # file, so the suite's output is still in the job log.
+        #
+        # `shell: bash` because this job also runs on windows-latest,
+        # where the default shell is PowerShell: `2>&1` redirects a
+        # different stream there and `$RUNNER_TEMP` is not a variable.
+        shell: bash
+        run: cargo test --locked --all-targets > "$RUNNER_TEMP/test.log" 2>&1
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
+
+      # A FLOOR, BECAUSE THE FAILURE MODE HERE IS AN ABSENCE.
+      #
+      # `cargo test` exits 0 on `0 passed; 0 failed`, so a filter that
+      # selects nothing, a build that produced no test binaries, or a
+      # `tests/` directory that stopped being compiled all report the
+      # same green as a full run. Nothing else in this job can tell the
+      # difference between a suite that passed and a suite that never
+      # ran; only a count sees it. That is the "fake coverage" the
+      # audit in antimatter-studios/diskjockey#197 was opened for.
+      #
+      # Measured 2026-09-17 on run 35174300791 (the CI run for main at
+      # 15aa277): 211 tests executed on each of ubuntu-latest,
+      # macos-latest and windows-latest -- the same suite on all three.
+      # The floor is 190, about ten percent below, so that a legitimately
+      # skipped platform-specific test or two does not turn the gate red
+      # while anything resembling a collapse does. It moves UP with the
+      # suite and never down.
+      #
+      # `if: always()` because a run that stopped early is precisely
+      # what this step is for: the count is worth reporting when the
+      # step above failed, and that is also where the suite's output
+      # lives now.
+      - name: test output, and the executed-test floor
+        if: always()
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/test.log"
+          if [ ! -f "$log" ]; then
+              echo "::error::the test step produced no log at all, so no test ran in this job"
+              exit 1
+          fi
+          cat "$log"
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$log" | awk '{s+=$4} END{print s+0}') || n=0
+          echo "tests executed: $n (floor 190)"
+          if [ "$n" -lt 190 ]; then
+              echo "::error::only $n tests executed, floor is 190 - 211 ran on 2026-09-17 in run 35174300791, and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
       - name: clippy
         working-directory: rust-img-vmdk
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -96,7 +151,33 @@ jobs:
           workspaces: rust-img-vmdk
       - name: test --release
         working-directory: rust-img-vmdk
-        run: cargo test --locked --release --all-targets
+        # THE SAME FLOOR AS THE DEBUG JOB, AND ITS OWN NUMBER. This is a
+        # different run selection -- a different profile, built and
+        # linked separately -- so it can empty on its own while the
+        # debug legs stay full, and a shared count would hide that.
+        #
+        # Measured 2026-09-17 on run 35174300791: 211 tests executed,
+        # floor set at 190. The same count as debug today because the
+        # same suite runs; they are recorded and checked separately
+        # because nothing makes them stay equal.
+        #
+        # No `shell: bash` here on purpose: the default shell on a Linux
+        # runner is already `bash -e`, while the `shell: bash` keyword
+        # would add `-o pipefail` and abort the step at the pipeline --
+        # skipping the count on exactly the failing run worth counting.
+        # `PIPESTATUS[0]` is what carries cargo's real status past
+        # `tee`, and it is re-raised at the end, so a failing suite
+        # still fails the job.
+        run: |
+          cargo test --locked --release --all-targets 2>&1 | tee "$RUNNER_TEMP/test-release.log"
+          rc=${PIPESTATUS[0]}
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test-release.log" | awk '{s+=$4} END{print s+0}') || n=0
+          echo "tests executed: $n (floor 190)"
+          if [ "$n" -lt 190 ]; then
+              echo "::error::only $n tests executed, floor is 190 - 211 ran on 2026-09-17 in run 35174300791, and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
+          exit "$rc"
 
   fmt:
     name: fmt
@@ -135,4 +216,29 @@ jobs:
           workspaces: rust-img-vmdk
       - name: qemu cross-validation tests
         working-directory: rust-img-vmdk
-        run: cargo test --locked --features qemu-validation --test qemu_validation
+        # THIS JOB'S FLOOR IS ITS OWN, AND IT IS THE ONE THAT MATTERS
+        # MOST. The run selects a single test target behind a feature
+        # flag, so two ordinary edits -- renaming the target, or letting
+        # the `qemu-validation` feature stop enabling the tests behind
+        # it -- leave `cargo test` with nothing to run and exiting 0.
+        # The job then reports green having cross-validated nothing
+        # against qemu-img, which is the entire value of the job. The
+        # same run in the debug matrix (without the feature) executes
+        # `0 passed` today and is green; that is what this shape looks
+        # like when it happens.
+        #
+        # Measured 2026-09-17 on run 35174300791: 26 tests executed.
+        # Floor 23, a little under ten percent below. Small counts still
+        # get a floor -- a floor of 0 is not a floor.
+        #
+        # No `shell: bash`: see the note in the release job above.
+        run: |
+          cargo test --locked --features qemu-validation --test qemu_validation 2>&1 | tee "$RUNNER_TEMP/qemu.log"
+          rc=${PIPESTATUS[0]}
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/qemu.log" | awk '{s+=$4} END{print s+0}') || n=0
+          echo "tests executed: $n (floor 23)"
+          if [ "$n" -lt 23 ]; then
+              echo "::error::only $n qemu cross-validation tests executed, floor is 23 - 26 ran on 2026-09-17 in run 35174300791, and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
+          exit "$rc"

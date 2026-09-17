@@ -1,0 +1,56 @@
+# .github-guard — declarations github-guard reads (see the github-guard skill:
+# https://github.com/antimatter-studios/agent-skills/blob/main/.claude/skills/github-guard/README.md).
+# git-config format: check with `git config -f .github-guard --list`, and
+# double-quote any value containing # or ;.
+
+# Required status checks for main. A declaration beats discovery exactly.
+#
+# Discovery requires checks BY JOB NAME, which is a guess at the PR gate and
+# drifts silently: a renamed job, an added workflow, or any future check
+# reporting under the github-actions app changes what is required without
+# anyone deciding to. Pinning it costs nothing and makes the intent reviewable.
+#
+# WHAT THIS PINS IS A LIST THAT NOBODY REVIEWS. Until now the six names below
+# lived only in the repository settings page, typed in by hand, with no diff,
+# no author and no reviewer. They happen to be correct today -- the audit in
+# antimatter-studios/diskjockey#197 checked, and the check-runs on main's HEAD
+# and on the newest pull_request check-suite are exactly these six, all
+# success. That is the state this file freezes. The next job added to ci.yml
+# is the one that matters: it starts reporting on every pull request, nothing
+# requires it, a red one merges, and the only trace is a settings page nobody
+# opens. The sibling rust-img-qcow2 was already in that state, producing a
+# `test / i686-unknown-linux-gnu` check that was never required by anyone.
+#
+# ONLY ci.yml CAN GATE A MERGE, and this repository makes that easy to get
+# wrong: release.yml runs jobs named `test` and `qemu-validation` too, but it
+# triggers on a `v*.*.*` tag, which happens AFTER the merge. A required check
+# that only a tag can produce never reports on a pull request and blocks the
+# repository permanently, so none of release.yml's jobs are declared here.
+# `qemu-validation` below is ci.yml's job of that name -- the one that runs on
+# pull_request -- and the collision is why the distinction is written down.
+#
+# Third-party reviewers are not in the list and do not need to be excluded by
+# hand: github-protect-main.sh filters `select(.app.slug=="github-actions")`
+# on every one of its queries, so a review app cannot become required.
+#
+# Names must match the check-run names GitHub reports EXACTLY, and the two
+# spellings here differ from each other on purpose: a matrix leg is
+# "test / ubuntu-latest", with spaces around the slash, because Actions joins
+# the job's `name:` to the matrix value that way, while `test (release)` is a
+# job whose own `name:` contains the parentheses. Neither is a typo, and a
+# misspelling of either is caught rather than enforced -- the guard keeps a
+# declared name only once it has concluded success on main, precisely so a
+# name that can never report cannot lock the branch.
+#
+# NO AGGREGATE GATE YET. The better end state is one always-run `ci-ok` job
+# that `needs:` every gating job and fails on failure, cancelled or skipped,
+# so the required list is one name and adding a job cannot escape the gate.
+# That is a change to ci.yml's shape and belongs in its own pull request; the
+# list is enumerated here in the meantime.
+[checks]
+	required = fmt
+	required = test / ubuntu-latest
+	required = test / macos-latest
+	required = test / windows-latest
+	required = test (release)
+	required = qemu-validation
