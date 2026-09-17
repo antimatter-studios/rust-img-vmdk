@@ -22,12 +22,17 @@ suitable for FFI from C/C++/Go/Swift.
       sidecar `.vmdk`)
 - [ ] `twoGbMaxExtentSparse` / `twoGbMaxExtentFlat` (split-extent
       variants used for FAT32 hosts)
-- [ ] `streamOptimized` (DEFLATE-compressed grains used by OVF)
+- [x] `streamOptimized` (DEFLATE-compressed grains used by OVF),
+      **read-only**: grains are inflated through their markers, with the
+      grain directory taken from the header or, for a stream written in
+      one pass, the footer. Opening one read-write is refused -- a
+      rewritten grain compresses to a different length and cannot go
+      back where the old one was.
 - [ ] `vmfs` / `vmfsSparse` (ESXi-native; rarely seen outside ESXi). A
       `vmfsSparse` extent carries the magic `COWD` rather than `KDMV` and
       is refused by name rather than reported as not a VMDK.
 
-Variants other than `monolithicSparse` return a clear "unsupported"
+Variants other than `monolithicSparse` and `streamOptimized` return a clear "unsupported"
 error rather than misreading the image. That includes the ones whose
 file is a descriptor rather than a sparse extent -- `monolithicFlat` and
 the `twoGbMaxExtent*` pair have no `KDMV` magic anywhere, and are

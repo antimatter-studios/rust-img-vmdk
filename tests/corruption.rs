@@ -318,26 +318,33 @@ fn a_one_sector_write_does_not_allocate_whatever_the_header_asks_for() {
 /// compared to anything, so an image declaring any revision at all was
 /// read with version-1 semantics.
 ///
-/// Version 3 is the stream-optimized revision: compressed grains, grain
-/// markers, and a footer that replaces the header at the end of the
-/// file. None of that is a layout this crate can walk. It happened to be
-/// refused today by a *second* field — `compressAlgorithm` — which
-/// leaves the refusal resting on the one place the format states the
-/// fact twice. A version-3 image with `compressAlgorithm` left at zero,
-/// which the field's own definition permits, walked straight through.
+/// Version 3 is the stream-optimized revision, which is read now (#48) --
+/// but only when `compressAlgorithm` says DEFLATE as well. A version-3
+/// image with `compressAlgorithm` left at zero, which the field's own
+/// definition permits, used to walk straight through with version-1
+/// semantics; it is refused as corrupt, since its two statements of the
+/// layout disagree. A revision past 3 is refused by name.
 #[test]
 fn a_sparse_extent_revision_we_cannot_read_is_refused_by_its_version() {
     let path = tmp_path("version_3");
     build_valid(&path);
     patch(&path, OFF_VERSION, &3u32.to_le_bytes());
-
     match VmdkReader::open(&path) {
-        Err(Error::Unsupported(msg)) => assert!(
+        Err(Error::Corrupt(msg)) => assert!(
             msg.contains("version 3"),
             "the refusal must name the revision, got {msg:?}"
         ),
+        Err(other) => panic!("expected Corrupt, got {other}"),
+        Ok(_) => panic!("read an uncompressed version-3 extent with version-1 semantics"),
+    }
+
+    let path = tmp_path("version_4");
+    build_valid(&path);
+    patch(&path, OFF_VERSION, &4u32.to_le_bytes());
+    match VmdkReader::open(&path) {
+        Err(Error::Unsupported(msg)) => assert!(msg.contains("version"), "{msg:?}"),
         Err(other) => panic!("expected Unsupported, got {other}"),
-        Ok(_) => panic!("read a stream-optimized extent with version-1 semantics"),
+        Ok(_) => panic!("read a version-4 extent"),
     }
 }
 
