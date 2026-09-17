@@ -774,7 +774,7 @@ fn exercise(path: &std::path::Path, rng_seed: u64) {
 #[test]
 fn random_patches_never_panic_open_read_or_write() {
     const ITERATIONS: u64 = 1500;
-    let mut rng = XorShift(0x5EED_0F_51_u64);
+    let mut rng = XorShift(0x5EED_0F51_u64);
     let path = tmp_path("mutation_sweep");
     let mut opened = 0u32;
     for i in 0..ITERATIONS {
