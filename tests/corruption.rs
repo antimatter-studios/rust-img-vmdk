@@ -624,3 +624,178 @@ fn the_descriptor_is_held_on_the_reader() {
     assert_eq!(d.extents[0].kind, "SPARSE");
     assert_eq!(d.extents[0].filename, "corrupt.vmdk");
 }
+
+/// A small, fixed-seed generator, so a failing patch reproduces from the
+/// iteration number printed with it.
+struct XorShift(u64);
+
+impl XorShift {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// One mutation of the valid image: `bytes` written at `offset`.
+#[derive(Debug, Clone)]
+struct Mutation {
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
+/// A value worth trying in a field: the edges a parser forgets, the
+/// sector numbers this image's own structures sit at, and noise.
+fn interesting(rng: &mut XorShift, width: usize) -> Vec<u8> {
+    let v: u64 = match rng.below(9) {
+        0 => 0,
+        1 => 1,
+        2 => u64::MAX,
+        3 => 1 << rng.below(64),
+        4 => [0, 1, GD_OFF_SECTOR, GT_OFF_SECTOR, GRAIN0_OFF_SECTOR][rng.below(5) as usize],
+        5 => FILE_LEN / SECTOR + rng.below(4),
+        6 => (u64::from(u32::MAX) >> rng.below(32)) + rng.below(2),
+        7 => rng.below(1 << 16),
+        _ => rng.next(),
+    };
+    v.to_le_bytes()[..width].to_vec()
+}
+
+/// Every header field, by the parser's own offsets, with its width.
+const HEADER_FIELDS: [(usize, usize); 13] = {
+    use vmdk::header::offsets::*;
+    [
+        (MAGIC, 4),
+        (VERSION, 4),
+        (FLAGS, 4),
+        (CAPACITY, 8),
+        (GRAIN_SIZE, 8),
+        (DESCRIPTOR_OFFSET, 8),
+        (DESCRIPTOR_SIZE, 8),
+        (NUM_GTES_PER_GT, 4),
+        (RGD_OFFSET, 8),
+        (GD_OFFSET, 8),
+        (OVER_HEAD, 8),
+        (UNCLEAN_SHUTDOWN, 1),
+        (COMPRESS_ALGORITHM, 2),
+    ]
+};
+
+/// Where a mutation lands: a whole header field, an entry of the grain
+/// directory or of grain table 0 -- the structures the reader turns into
+/// file offsets -- or, now and then, an arbitrary byte of the header.
+///
+/// Whole fields, because a byte-offset draw almost never lines up with
+/// one: every defect found here so far was a whole field set to an edge
+/// value, and a sweep that seldom writes one would pass without looking.
+fn mutation(rng: &mut XorShift) -> Mutation {
+    match rng.below(8) {
+        0..=3 => {
+            let (offset, width) = HEADER_FIELDS[rng.below(13) as usize];
+            Mutation {
+                offset: offset as u64,
+                bytes: interesting(rng, width),
+            }
+        }
+        4 => Mutation {
+            offset: GD_OFF_SECTOR * SECTOR + 4 * rng.below(4),
+            bytes: interesting(rng, 4),
+        },
+        5 | 6 => {
+            // Mostly the first few entries, where grain 0 and the writes
+            // below land; sometimes anywhere in the table.
+            let entry = if rng.below(2) == 0 {
+                rng.below(4)
+            } else {
+                rng.below(u64::from(NUM_GTES_PER_GT))
+            };
+            Mutation {
+                offset: GT_OFF_SECTOR * SECTOR + 4 * entry,
+                bytes: interesting(rng, 4),
+            }
+        }
+        _ => Mutation {
+            offset: rng.below(SECTOR),
+            bytes: interesting(rng, 1),
+        },
+    }
+}
+
+/// Open, read and write one mutated image. Any `Ok` or `Err` is fine; a
+/// panic is what the sweep exists to find.
+fn exercise(path: &std::path::Path, rng_seed: u64) {
+    let mut rng = XorShift(rng_seed | 1);
+    if let Ok(r) = VmdkReader::open(path) {
+        let size = r.virtual_size();
+        let mut buf = vec![0u8; 4096];
+        let offsets = [
+            0,
+            size.saturating_sub(1),
+            size / 2,
+            rng.below(size.max(1)),
+            size,
+            size.saturating_add(1),
+        ];
+        for off in offsets {
+            let _ = r.read_at(off, &mut buf);
+            let _ = r.read_at(off, &mut buf[..1]);
+        }
+    }
+    // The write path allocates grain tables and grains from header fields
+    // (#37 was write-only), so it is exercised on its own.
+    if let Ok(w) = VmdkReader::open_rw(path) {
+        let size = w.virtual_size();
+        let data = vec![0x5Au8; 512];
+        for off in [0, rng.below(size.max(1)), size.saturating_sub(512)] {
+            let _ = w.write_at(off, &data);
+        }
+        let _ = w.flush();
+    }
+}
+
+/// OPEN, READ AND WRITE NEVER PANIC ON A MUTATED IMAGE (#51).
+///
+/// Every defect found in this crate's parser so far was one on-disk field
+/// taking a value it did not anticipate, found by setting that field by
+/// hand. This does it 1500 times: the valid image, one field of the
+/// header, the grain directory or grain table 0 overwritten with an edge
+/// value or noise, then open, reads at the edges of the virtual disk,
+/// and writes. The seed is fixed, so a failure names the iteration and
+/// the patch, and replays exactly.
+///
+/// What this cannot see: an unbounded allocation that aborts the process
+/// rather than panicking, which ends the test run instead of failing it.
+#[test]
+fn random_patches_never_panic_open_read_or_write() {
+    const ITERATIONS: u64 = 1500;
+    let mut rng = XorShift(0x5EED_0F_51_u64);
+    let path = tmp_path("mutation_sweep");
+    let mut opened = 0u32;
+    for i in 0..ITERATIONS {
+        let m = mutation(&mut rng);
+        let seed = rng.next();
+        build_valid(&path);
+        patch(&path, m.offset, &m.bytes);
+        if VmdkReader::open(&path).is_ok() {
+            opened += 1;
+        }
+        let p: &std::path::Path = &path;
+        if std::panic::catch_unwind(|| exercise(p, seed)).is_err() {
+            panic!("iteration {i} panicked: {m:?}, exercise seed {seed:#x}");
+        }
+    }
+    // Most single-field patches still open, and those are the ones that
+    // reach the read and write paths. A sweep in which nothing opened
+    // would be testing only the header parser's refusals.
+    assert!(
+        opened > ITERATIONS as u32 / 4,
+        "only {opened} of {ITERATIONS} mutated images opened, so the read and write \
+         paths were barely reached"
+    );
+}
