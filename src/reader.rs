@@ -395,6 +395,18 @@ impl VmdkReader {
         // A STREAM-OPTIMIZED IMAGE IS NOT WRITTEN (#48). It is append-only
         // by construction: a rewritten grain compresses to a different
         // length and does not fit where the old one was.
+        // A COMPRESSED GRAIN IS INFLATED WHOLE, into a buffer of the size
+        // the header declares, so that size is bounded before any read.
+        // qemu refuses more than 0x200000 sectors (1 GiB) per grain for
+        // every VMDK ("Invalid granularity"); a stream-optimized image
+        // past it is refused here the same way, rather than by a failed
+        // allocation on the first read.
+        if header.is_stream_optimized() && header.grain_size > MAX_STREAM_OPTIMIZED_GRAIN_SECTORS {
+            return Err(Error::Corrupt(
+                "a stream-optimized grain larger than 1 GiB, which qemu refuses as an invalid \
+                 granularity and which would be inflated into one buffer",
+            ));
+        }
         if writable.is_some() && header.is_stream_optimized() {
             return Err(Error::Unsupported(
                 "a stream-optimized VMDK is read-only here: its grains are compressed and \
@@ -1604,6 +1616,10 @@ fn descriptor_agrees_with_header(desc: &Descriptor, header: &SparseHeader) -> Re
 
     Ok(())
 }
+
+/// The largest grain, in sectors, a stream-optimized image may declare:
+/// qemu's limit for any VMDK, 1 GiB.
+const MAX_STREAM_OPTIMIZED_GRAIN_SECTORS: u64 = 0x20_0000;
 
 /// zlib's conservative `deflateBound`: no zlib stream of `len` bytes is
 /// longer, whatever the compression settings. Saturating, because

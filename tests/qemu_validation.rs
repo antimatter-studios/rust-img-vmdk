@@ -567,6 +567,33 @@ fn a_compressed_record_longer_than_any_grain_stream_is_refused() {
     }
 }
 
+/// A stream-optimized grain is inflated whole, so a grain size past
+/// qemu's 1 GiB limit is refused at open rather than allocated on a read.
+/// 1 GiB itself still opens.
+#[test]
+fn a_stream_optimized_grain_past_one_gib_is_refused_at_open() {
+    let dir = TempDir::new("stream-grain");
+    let (_, mut bytes) = stream_image(&dir);
+    let path = dir.join("grain.vmdk");
+    bytes[20..28].copy_from_slice(&0x20_0000u64.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    if let Err(vmdk::Error::Corrupt(msg)) = VmdkReader::open(&path) {
+        assert!(
+            !msg.contains("1 GiB"),
+            "a 1 GiB grain is qemu's limit, not past it"
+        );
+    }
+    for sectors in [0x20_0001u64, u64::MAX / 512] {
+        bytes[20..28].copy_from_slice(&sectors.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        match VmdkReader::open(&path) {
+            Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("1 GiB"), "{msg}"),
+            Err(other) => panic!("{sectors} sectors: refused for the wrong reason: {other}"),
+            Ok(_) => panic!("a {sectors}-sector stream-optimized grain opened"),
+        }
+    }
+}
+
 /// A stream-optimized header under a `monolithicSparse` descriptor is
 /// refused: the two disagree about the layout.
 #[test]
