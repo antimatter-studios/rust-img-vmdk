@@ -492,6 +492,107 @@ fn a_grain_entry_naming_the_wrong_record_is_refused() {
     }
 }
 
+/// A qemu stream-optimized image of [`stream_source`], and its bytes.
+fn stream_image(dir: &TempDir) -> (Vec<u8>, Vec<u8>) {
+    let raw = dir.join("src.raw");
+    let data = stream_source();
+    std::fs::write(&raw, &data).unwrap();
+    let stream = dir.join("stream.vmdk");
+    assert_qemu(&[
+        "convert",
+        "-f",
+        "raw",
+        "-O",
+        "vmdk",
+        "-o",
+        "subformat=streamOptimized",
+        raw.to_str().unwrap(),
+        stream.to_str().unwrap(),
+    ]);
+    (data, std::fs::read(&stream).unwrap())
+}
+
+/// The byte offset of grain-table 0's entry `i`.
+fn grain_entry_at(bytes: &[u8], i: usize) -> usize {
+    let gd = u64::from_le_bytes(bytes[56..64].try_into().unwrap()) as usize * 512;
+    u32::from_le_bytes(bytes[gd..gd + 4].try_into().unwrap()) as usize * 512 + 4 * i
+}
+
+/// Two entries naming one record: after the first reads correctly, the
+/// second is still checked against the marker, not served from the
+/// inflated-grain cache.
+#[test]
+fn a_record_named_by_two_entries_is_refused_for_the_second_after_the_first_is_read() {
+    let dir = TempDir::new("stream-shared");
+    let (data, mut bytes) = stream_image(&dir);
+    let (first, third) = (grain_entry_at(&bytes, 0), grain_entry_at(&bytes, 2));
+    let record: [u8; 4] = bytes[first..first + 4].try_into().unwrap();
+    bytes[third..third + 4].copy_from_slice(&record);
+    let path = dir.join("shared.vmdk");
+    std::fs::write(&path, &bytes).unwrap();
+    let r = VmdkReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 512];
+    r.read_at(0, &mut buf).unwrap();
+    assert!(buf == data[..512], "grain 0 reads its own record");
+    match r.read_at(2 * 65536, &mut buf) {
+        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("different grain"), "{msg}"),
+        other => panic!("grain 2 was served grain 0's cached bytes: {other:?}"),
+    }
+}
+
+/// A record length no zlib stream of one grain reaches is refused before
+/// it is allocated. The file is extended so the length is inside it, and
+/// the stream is still valid, so only the bound can refuse it.
+#[test]
+fn a_compressed_record_longer_than_any_grain_stream_is_refused() {
+    let dir = TempDir::new("stream-long");
+    let (data, mut bytes) = stream_image(&dir);
+    let entry = grain_entry_at(&bytes, 0);
+    let record = u32::from_le_bytes(bytes[entry..entry + 4].try_into().unwrap()) as usize * 512;
+    let path = dir.join("long.vmdk");
+    std::fs::write(&path, &bytes).unwrap();
+    let r = VmdkReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 512];
+    r.read_at(0, &mut buf).unwrap();
+    assert!(buf == data[..512], "control: the unpatched record reads");
+
+    let too_long = 2 * 65536u32;
+    bytes[record + 8..record + 12].copy_from_slice(&too_long.to_le_bytes());
+    bytes.resize(bytes.len() + 4 * 65536, 0);
+    std::fs::write(&path, &bytes).unwrap();
+    let r = VmdkReader::open(&path).unwrap();
+    match r.read_at(0, &mut buf) {
+        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("longer than"), "{msg}"),
+        other => panic!("a {too_long}-byte record for a 64 KiB grain was read: {other:?}"),
+    }
+}
+
+/// A stream-optimized header under a `monolithicSparse` descriptor is
+/// refused: the two disagree about the layout.
+#[test]
+fn a_stream_optimized_header_under_a_monolithic_sparse_descriptor_is_refused() {
+    let dir = TempDir::new("stream-desc");
+    let (_, mut bytes) = stream_image(&dir);
+    let from = b"createType=\"streamOptimized\"";
+    let to = b"createType=\"monolithicSparse\"";
+    let at = bytes
+        .windows(from.len())
+        .position(|w| w == from)
+        .expect("fixture: qemu's descriptor names streamOptimized");
+    // One byte longer: shift the rest of the descriptor text along, into
+    // the first of the NULs after it.
+    let end = at + bytes[at..].iter().position(|&b| b == 0).unwrap();
+    bytes.copy_within(at + from.len()..end, at + to.len());
+    bytes[at..at + to.len()].copy_from_slice(to);
+    let path = dir.join("mislabelled.vmdk");
+    std::fs::write(&path, &bytes).unwrap();
+    match VmdkReader::open(&path) {
+        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("createType"), "{msg}"),
+        Err(other) => panic!("refused for the wrong reason: {other}"),
+        Ok(_) => panic!("a mislabelled stream-optimized image opened"),
+    }
+}
+
 /// The other half of the split-image story. The sidecar descriptor has
 /// no `KDMV` magic and fails in the header; the *extent* beside it has
 /// magic, gets past the header, and fails in the descriptor region —

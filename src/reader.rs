@@ -102,12 +102,17 @@ pub const SECTOR_SIZE: u64 = 512;
 /// sites, where it is indistinguishable from an unrelated 4.
 const GD_GT_ENTRY_SIZE: u64 = 4;
 
+/// A stream-optimized grain, inflated, keyed by its host sector and its
+/// virtual start.
+type InflatedGrain = ((u32, u64), Arc<Vec<u8>>);
+
 pub struct VmdkReader {
-    /// The stream-optimized grain inflated last, by its host sector (#48).
+    /// The stream-optimized grain inflated last, by its host sector and
+    /// its virtual start (#48).
     ///
     /// A caller reading in pieces smaller than a grain would otherwise
     /// inflate the same 64 KiB again for every piece.
-    inflated: Mutex<Option<(u32, Arc<Vec<u8>>)>>,
+    inflated: Mutex<Option<InflatedGrain>>,
     /// Backing device, as the read half. All host-offset reads go
     /// through here.
     ///
@@ -858,9 +863,14 @@ impl VmdkReader {
     /// not name. The LBA has to be this grain's: a pointer at another
     /// grain's record would otherwise serve its bytes here. The inflated
     /// length has to be one grain, less only for the disk's last grain.
+    ///
+    /// The cache is keyed by the virtual start as well as the host sector:
+    /// a record that two table entries name was checked against only the
+    /// first of them, and the second must fail the marker check rather
+    /// than be served the first one's bytes.
     fn inflated_grain(&self, grain_sector: u32, virtual_start: u64) -> Result<Arc<Vec<u8>>> {
-        if let Some((sector, grain)) = self.inflated.lock().unwrap().as_ref() {
-            if *sector == grain_sector {
+        if let Some((key, grain)) = self.inflated.lock().unwrap().as_ref() {
+            if *key == (grain_sector, virtual_start) {
                 return Ok(grain.clone());
             }
         }
@@ -881,11 +891,22 @@ impl VmdkReader {
                  that points at it",
             ));
         }
+        let grain_bytes = self.grain_size_bytes();
+        // No zlib stream of one grain is longer than zlib's own
+        // `deflateBound` for it (the bound for any compression settings),
+        // so a longer record is corrupt -- and is refused before its
+        // image-controlled length becomes an allocation.
+        let bound =
+            grain_bytes + (grain_bytes >> 5) + (grain_bytes >> 7) + (grain_bytes >> 11) + 7 + 6;
+        if size > bound {
+            return Err(Error::Corrupt(
+                "a compressed grain's record is longer than any zlib stream of one grain",
+            ));
+        }
         let payload_at = self.grain_host_offset(grain_sector, MARKER, size)?;
         let mut compressed = vec![0u8; size as usize];
         self.dev_read(payload_at, &mut compressed)?;
 
-        let grain_bytes = self.grain_size_bytes();
         let expected = grain_bytes.min(self.virtual_size - virtual_start) as usize;
         let mut grain = vec![0u8; grain_bytes as usize];
         let mut inflate = flate2::Decompress::new(true);
@@ -904,7 +925,7 @@ impl VmdkReader {
             ));
         }
         let grain = Arc::new(grain);
-        *self.inflated.lock().unwrap() = Some((grain_sector, grain.clone()));
+        *self.inflated.lock().unwrap() = Some(((grain_sector, virtual_start), grain.clone()));
         Ok(grain)
     }
 
@@ -1563,6 +1584,17 @@ fn descriptor_agrees_with_header(desc: &Descriptor, header: &SparseHeader) -> Re
     if !extent.kind.eq_ignore_ascii_case("SPARSE") {
         return Err(Error::Unsupported(
             "the descriptor's extent is not SPARSE, so the data is not laid out the way              a sparse extent's grain directory describes",
+        ));
+    }
+
+    // THE LAYOUT IS STATED TWICE, and the two must agree. A descriptor
+    // saying `streamOptimized` over an uncompressed header, or the
+    // reverse, is read (or written) under one of two layouts with nothing
+    // to say which is true.
+    if (desc.create_type == "streamOptimized") != header.is_stream_optimized() {
+        return Err(Error::Corrupt(
+            "the descriptor's createType and the header's compression disagree about \
+             whether this is a stream-optimized image",
         ));
     }
 
