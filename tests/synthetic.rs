@@ -126,6 +126,34 @@ fn build_vmdk(path: &std::path::Path, allocate_grain0: bool, grain_pattern: &[u8
 // Tests
 // ---------------------------------------------------------------------------
 
+/// An uncompressed (version 1) sparse extent whose descriptor says
+/// `streamOptimized` is refused for reading and for writing: the header
+/// and the descriptor disagree about the layout, and a write would be
+/// made under whichever one the writer happened to check (#48).
+#[test]
+fn a_stream_optimized_descriptor_over_an_uncompressed_header_is_refused() {
+    let path = tmp_path("desc-stream");
+    let pattern = vec![0u8; (GRAIN_SIZE * SECTOR) as usize];
+    build_vmdk(&path, true, &pattern);
+    assert!(VmdkReader::open_rw(&path).is_ok(), "control");
+    let descriptor = build_descriptor_sector();
+    let from = b"monolithicSparse\"";
+    let at = descriptor
+        .windows(from.len())
+        .position(|w| w == from)
+        .unwrap() as u64;
+    common::patch(&path, DESC_OFF_SECTOR * SECTOR + at, b"streamOptimized\" ");
+    match VmdkReader::open(&path) {
+        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("createType"), "{msg}"),
+        Err(other) => panic!("refused for the wrong reason: {other}"),
+        Ok(_) => panic!("a streamOptimized descriptor opened over a version 1 header"),
+    }
+    assert!(
+        VmdkReader::open_rw(&path).is_err(),
+        "it must not open for writing either"
+    );
+}
+
 #[test]
 fn opens_and_reports_virtual_size() {
     let path = tmp_path("size");
