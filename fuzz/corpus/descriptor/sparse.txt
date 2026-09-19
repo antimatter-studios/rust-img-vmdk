@@ -1,0 +1,18 @@
+# Disk DescriptorFile
+version=1
+CID=6584d9f7
+parentCID=ffffffff
+createType="monolithicSparse"
+
+# Extent description
+RW 993 SPARSE "sparse.vmdk"
+
+# The Disk Data Base
+#DDB
+
+ddb.virtualHWVersion = "4"
+ddb.geometry.cylinders = "0"
+ddb.geometry.heads = "16"
+ddb.geometry.sectors = "63"
+ddb.adapterType = "ide"
+ddb.toolsVersion = "2147483647"

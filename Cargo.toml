@@ -6,6 +6,11 @@ license = "MIT"
 description = "Pure-Rust VMDK (VMware Virtual Machine Disk) read+write driver. Monolithic sparse variant, BlockDevice-backed. Exposes a Rust API and a C ABI."
 repository = "https://github.com/antimatter-studios/rust-img-vmdk"
 
+# The fuzz crate is its own package, on its own toolchain, and is not
+# part of this one. Without this, `cargo package` and `cargo publish`
+# try to include it and fail on the nightly-only dependency.
+exclude = ["fuzz"]
+
 [lib]
 name = "vmdk"
 crate-type = ["staticlib", "rlib"]
