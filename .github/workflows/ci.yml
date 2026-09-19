@@ -37,81 +37,59 @@ jobs:
         run: cargo build --locked --all-targets
       - name: test
         working-directory: rust-img-vmdk
+        # QUIET BY DEFAULT: the whole run goes to tmp/logs/debug.log and is
+        # uploaded below; this step prints a verdict line and the
+        # executed-test count. A failure prints the tail of the log. See the
+        # measured budget table at the top of chores.yml, and scripts/tier.sh.
+        #
         # EXPECT_OVERFLOW_CHECKS ARMS THE ONE CHECK A TEXT SCAN CANNOT DO.
-        # This run has no `--release`, so overflow-checks are on, and it
-        # is what makes every arithmetic test in this crate mean anything.
+        # This run has no `--release`, so overflow-checks are on, and it is
+        # what makes every arithmetic test in this crate mean anything. The
+        # variable tells `overflow_checks::the_build_the_gate_asked_to_check
+        # _does_check` in src/lib.rs that THIS is the run that must trap an
+        # overflow. It is an `env:` mapping rather than an inline prefix
+        # because this job also runs on windows-latest, where that prefix is
+        # a PowerShell syntax error. Do not add `--release` and do not drop
+        # the variable: tests/ci_profile.rs reads this file and fails if no
+        # `cargo test` in it runs without `--release` while setting it (#77).
         #
-        # The variable tells `overflow_checks::the_build_the_gate_asked_to
-        # _check_does_check` in src/lib.rs that THIS is the run that must
-        # trap an overflow -- asking the build directly rather than
-        # inferring it from which spellings of "disabled" happen to be
-        # absent from Cargo.toml. It is declared as an `env:` mapping
-        # rather than inline as `VAR=1 cargo test` because this job also
-        # runs on windows-latest, where that prefix is a PowerShell
-        # syntax error.
+        # THE FLOOR IS IN THIS STEP NOW, not in an `if: always()` step after
+        # it. It used to live there so that a failing run still printed its
+        # log; the tier wrapper prints the tail itself and the artefact keeps
+        # the whole thing, so the reason is gone -- and a step carrying `if:`
+        # is not one the pull-request gate reads, which made the floor
+        # invisible to the guards in tests/ci_profile.rs.
         #
-        # Do not add `--release` to this run, and do not drop the
-        # variable: tests/ci_profile.rs reads this file and fails if no
-        # `cargo test` in it runs without `--release` while setting this.
-        # See #77.
+        # `cargo test` exits 0 on "0 passed; 0 failed", so a filter that
+        # selects nothing, a build that produced no test binaries, or a
+        # `tests/` directory that stopped being compiled all report the same
+        # green as a full run -- and the empty run is also the one that fits
+        # its output budget best. That is the "fake coverage" the audit in
+        # antimatter-studios/diskjockey#197 was opened for. Measured
+        # 2026-09-17 on run 35174300791 (main, 15aa277): 211 executed on each
+        # of the three legs; this branch runs 250. The floor is
+        # 230, about ten percent below, and it moves UP with the suite
+        # and never down.
         #
-        # THE OUTPUT GOES TO A FILE RATHER THAN THROUGH `tee`, and the
-        # shape is forced rather than chosen. Actions runs a `run:`
-        # block as `bash -e` with no `pipefail`, so `cargo test | tee`
-        # reports `tee`'s exit status -- a red suite would go green --
-        # and tests/ci_profile.rs refuses a run whose status is
-        # discarded for exactly that reason. A redirection is not a
-        # pipe: the status is still cargo's, `set -e` still ends the
-        # step, and the guard still counts this as the debug run that
-        # proves the build traps an overflow. The step below prints the
-        # file, so the suite's output is still in the job log.
-        #
-        # `shell: bash` because this job also runs on windows-latest,
-        # where the default shell is PowerShell: `2>&1` redirects a
-        # different stream there and `$RUNNER_TEMP` is not a variable.
-        shell: bash
-        run: cargo test --locked --all-targets > "$RUNNER_TEMP/test.log" 2>&1
-        env:
-          EXPECT_OVERFLOW_CHECKS: "1"
-
-      # A FLOOR, BECAUSE THE FAILURE MODE HERE IS AN ABSENCE.
-      #
-      # `cargo test` exits 0 on `0 passed; 0 failed`, so a filter that
-      # selects nothing, a build that produced no test binaries, or a
-      # `tests/` directory that stopped being compiled all report the
-      # same green as a full run. Nothing else in this job can tell the
-      # difference between a suite that passed and a suite that never
-      # ran; only a count sees it. That is the "fake coverage" the
-      # audit in antimatter-studios/diskjockey#197 was opened for.
-      #
-      # Measured 2026-09-17 on run 35174300791 (the CI run for main at
-      # 15aa277): 211 tests executed on each of ubuntu-latest,
-      # macos-latest and windows-latest -- the same suite on all three.
-      # The floor is 190, about ten percent below, so that a legitimately
-      # skipped platform-specific test or two does not turn the gate red
-      # while anything resembling a collapse does. It moves UP with the
-      # suite and never down.
-      #
-      # `if: always()` because a run that stopped early is precisely
-      # what this step is for: the count is worth reporting when the
-      # step above failed, and that is also where the suite's output
-      # lives now.
-      - name: test output, and the executed-test floor
-        if: always()
+        # `shell: bash` on every runner, because the tier scripts are bash
+        # and the default shell on windows-latest is PowerShell.
         shell: bash
         run: |
-          log="$RUNNER_TEMP/test.log"
-          if [ ! -f "$log" ]; then
-              echo "::error::the test step produced no log at all, so no test ran in this job"
-              exit 1
-          fi
-          cat "$log"
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$log" | awk '{s+=$4} END{print s+0}') || n=0
-          echo "tests executed: $n (floor 190)"
-          if [ "$n" -lt 190 ]; then
-              echo "::error::only $n tests executed, floor is 190 - 211 ran on 2026-09-17 in run 35174300791, and a run that executes less than that stopped early rather than passed"
-              exit 1
-          fi
+          bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets
+          bash scripts/test-floor.sh debug 225
+        env:
+          EXPECT_OVERFLOW_CHECKS: "1"
+      - name: keep the tier log
+        # `always()`, so the log survives the failure it exists to explain.
+        # A failing tier already prints its tail into this job log; this is
+        # what keeps the WHOLE run once the runner is gone.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-test-${{ matrix.os }}
+          path: rust-img-vmdk/tmp/logs/
+          if-no-files-found: warn
+          retention-days: 7
       - name: clippy
         working-directory: rust-img-vmdk
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -151,33 +129,31 @@ jobs:
           workspaces: rust-img-vmdk
       - name: test --release
         working-directory: rust-img-vmdk
-        # THE SAME FLOOR AS THE DEBUG JOB, AND ITS OWN NUMBER. This is a
-        # different run selection -- a different profile, built and
-        # linked separately -- so it can empty on its own while the
-        # debug legs stay full, and a shared count would hide that.
+        # ITS OWN TIER AND ITS OWN NUMBER. This is a different run selection
+        # -- a different profile, built and linked separately -- so it can
+        # empty on its own while the debug legs stay full, and a shared count
+        # would hide that.
         #
-        # Measured 2026-09-17 on run 35174300791: 211 tests executed,
-        # floor set at 190. The same count as debug today because the
-        # same suite runs; they are recorded and checked separately
-        # because nothing makes them stay equal.
+        # Measured 2026-09-17 on run 35174300791: 211 executed; this branch
+        # runs 250, and the floor is 230. The same count as debug
+        # today because the same suite runs; they are recorded and checked
+        # separately because nothing makes them stay equal.
         #
-        # No `shell: bash` here on purpose: the default shell on a Linux
-        # runner is already `bash -e`, while the `shell: bash` keyword
-        # would add `-o pipefail` and abort the step at the pipeline --
-        # skipping the count on exactly the failing run worth counting.
-        # `PIPESTATUS[0]` is what carries cargo's real status past
-        # `tee`, and it is re-raised at the end, so a failing suite
-        # still fails the job.
+        # THE PIPE IS GONE, and with it the reason this step had to re-raise
+        # `PIPESTATUS[0]` by hand. scripts/tier.sh redirects rather than
+        # pipes, so the status on the floor line is the suite's own.
+        shell: bash
         run: |
-          cargo test --locked --release --all-targets 2>&1 | tee "$RUNNER_TEMP/test-release.log"
-          rc=${PIPESTATUS[0]}
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test-release.log" | awk '{s+=$4} END{print s+0}') || n=0
-          echo "tests executed: $n (floor 190)"
-          if [ "$n" -lt 190 ]; then
-              echo "::error::only $n tests executed, floor is 190 - 211 ran on 2026-09-17 in run 35174300791, and a run that executes less than that stopped early rather than passed"
-              exit 1
-          fi
-          exit "$rc"
+          bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets
+          bash scripts/test-floor.sh release 225
+      - name: keep the tier log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-release
+          path: rust-img-vmdk/tmp/logs/
+          if-no-files-found: warn
+          retention-days: 7
 
   fmt:
     name: fmt
@@ -216,29 +192,34 @@ jobs:
           workspaces: rust-img-vmdk
       - name: qemu cross-validation tests
         working-directory: rust-img-vmdk
-        # THIS JOB'S FLOOR IS ITS OWN, AND IT IS THE ONE THAT MATTERS
-        # MOST. The run selects a single test target behind a feature
-        # flag, so two ordinary edits -- renaming the target, or letting
-        # the `qemu-validation` feature stop enabling the tests behind
-        # it -- leave `cargo test` with nothing to run and exiting 0.
-        # The job then reports green having cross-validated nothing
-        # against qemu-img, which is the entire value of the job. The
-        # same run in the debug matrix (without the feature) executes
-        # `0 passed` today and is green; that is what this shape looks
-        # like when it happens.
+        # THIS JOB'S FLOOR IS ITS OWN, AND IT IS THE ONE THAT MATTERS MOST.
+        # The run selects a single test target behind a feature flag, so two
+        # ordinary edits -- renaming the target, or letting the
+        # `qemu-validation` feature stop enabling the tests behind it --
+        # leave `cargo test` with nothing to run and exiting 0. The job then
+        # reports green having cross-validated nothing against qemu-img,
+        # which is the entire value of the job.
         #
-        # Measured 2026-09-17 on run 35174300791: 26 tests executed.
-        # Floor 23, a little under ten percent below. Small counts still
-        # get a floor -- a floor of 0 is not a floor.
+        # Measured 2026-09-17 on run 35174300791: 26 executed. Floor 23, a
+        # little under ten percent below. Small counts still get a floor --
+        # a floor of 0 is not a floor.
         #
-        # No `shell: bash`: see the note in the release job above.
+        # THE JOB ITSELF IS GUARDED NOW TOO.
+        # `the_pr_gate_still_cross_validates_against_qemu_img` in
+        # tests/ci_profile.rs reads this file and fails unless a gating job
+        # named `qemu-validation` installs `qemu-utils` and runs `--features
+        # qemu-validation --test qemu_validation`. Before it, deleting this
+        # whole job left every test in the repository green -- the floor goes
+        # with the step it lives in (#112).
+        shell: bash
         run: |
-          cargo test --locked --features qemu-validation --test qemu_validation 2>&1 | tee "$RUNNER_TEMP/qemu.log"
-          rc=${PIPESTATUS[0]}
-          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/qemu.log" | awk '{s+=$4} END{print s+0}') || n=0
-          echo "tests executed: $n (floor 23)"
-          if [ "$n" -lt 23 ]; then
-              echo "::error::only $n qemu cross-validation tests executed, floor is 23 - 26 ran on 2026-09-17 in run 35174300791, and a run that executes less than that stopped early rather than passed"
-              exit 1
-          fi
-          exit "$rc"
+          bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation
+          bash scripts/test-floor.sh qemu 23
+      - name: keep the tier log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-qemu
+          path: rust-img-vmdk/tmp/logs/
+          if-no-files-found: warn
+          retention-days: 7
