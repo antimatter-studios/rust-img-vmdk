@@ -6,6 +6,42 @@ never does.
 
 ## [Unreleased]
 
+### Added
+
+- **The sparse header and text descriptor parsers are fuzzed, on two
+  tiers.** VMDK is two parsers that fail differently — the binary header
+  carries `grain_size`, `num_gtes_per_gt`, `gd_offset` and `capacity`,
+  all used in arithmetic on the read path, and the descriptor is text
+  with unbounded line lengths, extent counts that need not match the file
+  and parent links. Neither had a fuzz target. `fuzz/` holds `image`,
+  `header` and `descriptor` and runs nightly on a bounded budget;
+  `tests/fuzz_decoders.rs` is the gate, 7,296 deterministic cases in a
+  quarter of a second on the stable toolchain.
+
+  The descriptor target uses `from_utf8` rather than a lossy conversion,
+  because that is what the read path does: a descriptor that is not UTF-8
+  is refused there, so mutating one into a lossily-repaired string would
+  test a path no image can reach.
+
+  `the_corpus_reads_back_what_qemu_img_wrote` makes the corpus an oracle
+  rather than fuel — `A` at 0, `B` at 500,000, zeros in the hole between
+  — on a machine with no `qemu-img` installed (#114).
+
+- **`streamOptimized` images are read** (#48), the layout inside every
+  OVA. A grain-table entry names a marker (the grain's virtual LBA and
+  its compressed length) followed by a zlib stream, which is inflated,
+  checked to be the grain the entry is for, and kept for the next read of
+  the same grain. The grain directory comes from the header or, when the
+  header says it is at the end, from the footer. Version 3 is accepted
+  only with DEFLATE compression and compression only in version 3.
+  Writing is refused. New dependency: `flate2`, on its pure-Rust backend.
+- `SparseHeader::has_redundant_grain_directory`.
+- `header::SUPPORTED_VERSIONS` and `header::MAGIC_VMFS_SPARSE`.
+- The `FLAG_REDUNDANT_GRAIN_TABLE` constant.
+- `SparseHeader::uses_zeroed_grain_marker`, plus the `FLAG_ZEROED_GRAIN`
+  and `GTE_ZEROED_GRAIN` constants that name the two halves of the
+  convention.
+
 ### Fixed
 
 - **Grain pointers are checked against every metadata region, not a
@@ -148,23 +184,6 @@ never does.
   pointer was checked only by the read failing past EOF. A pointer that
   lands inside the header, the descriptor or a grain directory is now an
   error rather than plausible-looking bytes.
-
-### Added
-
-- **`streamOptimized` images are read** (#48), the layout inside every
-  OVA. A grain-table entry names a marker (the grain's virtual LBA and
-  its compressed length) followed by a zlib stream, which is inflated,
-  checked to be the grain the entry is for, and kept for the next read of
-  the same grain. The grain directory comes from the header or, when the
-  header says it is at the end, from the footer. Version 3 is accepted
-  only with DEFLATE compression and compression only in version 3.
-  Writing is refused. New dependency: `flate2`, on its pure-Rust backend.
-- `SparseHeader::has_redundant_grain_directory`.
-- `header::SUPPORTED_VERSIONS` and `header::MAGIC_VMFS_SPARSE`.
-- The `FLAG_REDUNDANT_GRAIN_TABLE` constant.
-- `SparseHeader::uses_zeroed_grain_marker`, plus the `FLAG_ZEROED_GRAIN`
-  and `GTE_ZEROED_GRAIN` constants that name the two halves of the
-  convention.
 
 ### Changed
 
