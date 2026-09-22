@@ -10,47 +10,81 @@
 # reporting under the github-actions app changes what is required without
 # anyone deciding to. Pinning it costs nothing and makes the intent reviewable.
 #
-# WHAT THIS PINS IS A LIST THAT NOBODY REVIEWS. Until now the six names below
-# lived only in the repository settings page, typed in by hand, with no diff,
-# no author and no reviewer. They happen to be correct today -- the audit in
-# antimatter-studios/diskjockey#197 checked, and the check-runs on main's HEAD
-# and on the newest pull_request check-suite are exactly these six, all
-# success. That is the state this file freezes. The next job added to ci.yml
-# is the one that matters: it starts reporting on every pull request, nothing
-# requires it, a red one merges, and the only trace is a settings page nobody
-# opens. The sibling rust-img-qcow2 was already in that state, producing a
+# WHAT THIS FILE FIRST PINNED WAS A LIST NOBODY REVIEWED. Six names — `fmt`,
+# `test / ubuntu-latest`, `test / macos-latest`, `test / windows-latest`,
+# `test (release)` and `qemu-validation` — lived only in the repository
+# settings page, typed in by hand, with no diff, no author and no reviewer.
+# They were correct on the day: the audit in antimatter-studios/diskjockey#197
+# checked, and the check-runs on main's HEAD and on the newest pull_request
+# check-suite were exactly those six, all success. The sibling rust-img-qcow2
+# was already in the state that follows from not checking, producing a
 # `test / i686-unknown-linux-gnu` check that was never required by anyone.
 #
+# ONE NAME NOW, BECAUSE A JOB STANDS FOR THE REST (#111). Moving the list into
+# this file made it reviewable; it did not stop it drifting, because the drift
+# is a diff nobody is obliged to write. Both directions were one ordinary edit
+# away:
+#
+#   * add a leg to ci.yml's `os:` matrix and it reports on every pull request,
+#     requiring nothing and gating nothing — the rust-img-qcow2 state again.
+#   * rename a job, or mis-spell one here, and the declared name is a name no
+#     job produces. GitHub reads a required-and-absent context as PENDING, not
+#     as failed, so with enforce_admins on nothing merges and there is no
+#     failure to point at. The two spellings in ci.yml are what makes that easy
+#     to do by hand: a matrix leg is "test / ubuntu-latest", with spaces around
+#     the slash, because Actions joins the job's `name:` to the matrix value
+#     that way, while `test (release)` is a job whose own `name:` carries
+#     literal parentheses and no slash. Neither is a convention, so neither can
+#     be inferred from the other, and `test / release` is a name that never
+#     reports.
+#
+# So ci.yml grew one job, `ci-ok`, whose `needs:` names every other job in the
+# file and which fails unless each concluded `success` — failure, cancellation
+# and skipping all counting against it, with `if: always()` so a skipped
+# dependency is judged rather than leaving the aggregate skipped beside it.
+# That list lives next to the jobs it names, changed in the same diff that
+# renames, splits or adds one, and the name protection asks for does not move
+# when the jobs do.
+#
+# WHAT ci-ok STANDS FOR. All four jobs run on `pull_request` (ci.yml triggers
+# on `push` to main and on `pull_request` with no branch filter), so all four
+# can gate one:
+#
+#   test            three matrix legs, ubuntu/macos/windows-latest: build,
+#                   `cargo test --locked --all-targets` under a measured output
+#                   budget and a test-count floor, then clippy. Debug profile,
+#                   so this is the run carrying the EXPECT_OVERFLOW_CHECKS
+#                   handshake tests/ci_profile.rs insists on.
+#   test-release    `test (release)`. Not a second copy of the matrix: release
+#                   lets an integer overflow wrap where debug panics, so a test
+#                   guarding a wrapping computation — grain tables, extent
+#                   offsets, sector counts scaled by 512 — passes the debug run
+#                   for the wrong reason. It is the only run that compiles the
+#                   profile that is published.
+#   qemu-validation cross-validates our reader and writer against `qemu-img`,
+#                   the only check that compares this crate to an
+#                   implementation we did not write.
+#   fmt             `cargo fmt --check`.
+#
 # ONLY ci.yml CAN GATE A MERGE, and this repository makes that easy to get
-# wrong: release.yml runs jobs named `test` and `qemu-validation` too, but it
-# triggers on a `v*.*.*` tag, which happens AFTER the merge. A required check
-# that only a tag can produce never reports on a pull request and blocks the
-# repository permanently, so none of release.yml's jobs are declared here.
-# `qemu-validation` below is ci.yml's job of that name -- the one that runs on
-# pull_request -- and the collision is why the distinction is written down.
+# wrong: release.yml runs jobs named `test` and `qemu-validation` too — the
+# same names — but it triggers on a `v*.*.*` tag, which happens AFTER the
+# merge it would have gated, and fuzz.yml is workflow_dispatch plus a nightly
+# cron. A required check that only a tag or a schedule can produce never
+# reports on a pull request and blocks the repository permanently, which is the
+# same pending-forever failure as a mis-spelled name. `needs:` cannot reach
+# those jobs in any case: it names jobs in its own workflow only, which is why
+# the name collision is harmless here and was worth writing down.
 #
 # Third-party reviewers are not in the list and do not need to be excluded by
 # hand: github-protect-main.sh filters `select(.app.slug=="github-actions")`
 # on every one of its queries, so a review app cannot become required.
 #
-# Names must match the check-run names GitHub reports EXACTLY, and the two
-# spellings here differ from each other on purpose: a matrix leg is
-# "test / ubuntu-latest", with spaces around the slash, because Actions joins
-# the job's `name:` to the matrix value that way, while `test (release)` is a
-# job whose own `name:` contains the parentheses. Neither is a typo, and a
-# misspelling of either is caught rather than enforced -- the guard keeps a
-# declared name only once it has concluded success on main, precisely so a
-# name that can never report cannot lock the branch.
+# The name must match the check-run name GitHub reports, which for this job is
+# both its key and its `name:` — `ci-ok`.
 #
-# NO AGGREGATE GATE YET. The better end state is one always-run `ci-ok` job
-# that `needs:` every gating job and fails on failure, cancelled or skipped,
-# so the required list is one name and adding a job cannot escape the gate.
-# That is a change to ci.yml's shape and belongs in its own pull request; the
-# list is enumerated here in the meantime.
+# tests/ci_aggregate_gate.rs holds both halves to each other: every job in
+# ci.yml has to appear in `ci-ok`'s `needs`, and this file has to require
+# `ci-ok` and nothing else.
 [checks]
-	required = fmt
-	required = test / ubuntu-latest
-	required = test / macos-latest
-	required = test / windows-latest
-	required = test (release)
-	required = qemu-validation
+	required = ci-ok

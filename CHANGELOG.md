@@ -190,6 +190,16 @@ never does.
 - `open_rw` refuses an image whose redundant grain directory does not fit
   inside the file. A read-only open still succeeds, since reads never
   consult it.
+- **One required check, `ci-ok`, stands for every job in `ci.yml`.**
+  Branch protection named six job names by hand — `fmt`, the three
+  `test / <os>` matrix legs, `test (release)` and `qemu-validation` — so
+  adding a matrix leg produced a check that gated nothing, and renaming a
+  job left a required name no job reports, which GitHub reads as
+  permanently pending rather than failed. `ci-ok` runs with
+  `if: always()`, `needs:` every other job in `ci.yml`, and fails when any
+  of them failed, was cancelled or was skipped.
+  `tests/ci_aggregate_gate.rs` holds `ci.yml` and `.github-guard` to each
+  other (#111).
 
 ## [0.3.5] — 2026-09-06
 
