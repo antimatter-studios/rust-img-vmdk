@@ -50,7 +50,7 @@
 //! with the two files agreeing on the numbers -- is in `tests/ci_profile.rs`,
 //! which is the file that already parses both.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::Mutex;
 
@@ -113,7 +113,14 @@ struct Tier<'a> {
 /// inherits the environment, which is how the positive cases reach whatever
 /// rust-fs-core this checkout is arranged against, and `Some(path)` is how
 /// the refusals point the resolver at a scratch directory.
-fn run_tier(tier: &Tier, core_root: Option<&Path>, verbose: bool) -> Output {
+///
+/// THAT PATH IS RELATIVE TO THE REPOSITORY, for the same reason the script
+/// path is. Handing Git Bash an absolute `D:\a\...` is handing it something
+/// it cannot test or copy -- measured on windows-latest, where `tier.sh`
+/// joined it onto the repository root and reported a path with two drive
+/// letters in it. `tier.sh` resolves a relative FS_CORE_ROOT against the
+/// repository, which is also how `ci.yml` spells it.
+fn run_tier(tier: &Tier, core_root: Option<&str>, verbose: bool) -> Output {
     let mut command = Command::new(bash());
     command
         .current_dir(repo())
@@ -160,13 +167,16 @@ fn log_contents(name: &str) -> String {
         .unwrap_or_else(|e| panic!("the tier left no log at {relative}: {e}"))
 }
 
-/// A scratch directory under `tmp/`, which is gitignored.
-fn scratch(name: &str) -> PathBuf {
+/// A scratch directory under `tmp/`, which is gitignored, returned as a path
+/// RELATIVE to the repository -- see `run_tier`: an absolute one is not a
+/// path Git Bash can use.
+fn scratch(name: &str) -> String {
+    let relative = format!("tmp/resolver-test/{name}");
     let directory = repo().join("tmp").join("resolver-test").join(name);
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(directory.join("scripts"))
         .unwrap_or_else(|e| panic!("could not create {}: {e}", directory.display()));
-    directory
+    relative
 }
 
 /// A command that prints 40 lines and succeeds.
@@ -488,7 +498,7 @@ fn the_resolver_refuses_a_wrapper_that_answers_the_wrong_api_version() {
     // mean the tiers silently ran against a different wrapper than the one
     // the checkout supplies.
     let impostor = scratch("impostor");
-    let script = impostor.join("scripts").join("output-budget.sh");
+    let script = repo().join(&impostor).join("scripts/output-budget.sh");
     std::fs::write(
         &script,
         r#"#!/usr/bin/env bash
