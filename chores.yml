@@ -27,9 +27,15 @@ chore_min_version: 0.6.0
 # QUIET BY DEFAULT, --verbose ON REQUEST, AND THE BUDGET IS A NUMBER.
 #
 #   A test task prints a VERDICT: one line per tier, a final count, and the
-#   path of the log holding everything else. A failure prints the TAIL of
-#   that log. `chore test -- --verbose` (or FLTH_VERBOSE=1) streams the whole
-#   run as it happens.
+#   path of the log holding everything else. A failure prints one line naming
+#   that log and exits with the suite's own status; the tail is opt-in
+#   (`OUTPUT_BUDGET_FAIL_TAIL=40`), because the reader who pays most for it
+#   re-reads its transcript on every later step. `chore test -- --verbose`
+#   (or OUTPUT_BUDGET_VERBOSE=1) streams the whole run as it happens.
+#
+#   THE VARIABLE WAS FLTH_VERBOSE. It was renamed when the wrapper became
+#   rust-fs-core's; the old name is not read, and setting it leaves the run
+#   quiet rather than erroring.
 #
 #   Nothing is thrown away: every tier's output goes to tmp/logs/<tier>.log
 #   in full, and CI uploads that directory as an artefact. What changed is
@@ -78,11 +84,19 @@ chore_min_version: 0.6.0
 #   9.5M of output, with command output the largest single contributor a
 #   repository controls.
 #
-#   WHERE THE SCRIPT CAME FROM. scripts/output-budget.sh is a vendored copy
-#   of fs-linux-test-harness's, at v0.1.0; the header of that file says why a
-#   copy rather than the sibling the filesystem crates read it from, and
-#   tests/output_budget.rs holds the copy to the behaviour rather than to the
-#   bytes.
+#   WHERE THE SCRIPT COMES FROM, AND WHY IT IS NOT IN THIS REPOSITORY.
+#   scripts/output-budget.sh used to be a vendored copy of
+#   fs-linux-test-harness's. It is gone (rust-fs-core#153): the canonical
+#   wrapper belongs to rust-fs-core, and scripts/tier.sh resolves it AT RUN
+#   TIME -- $FS_CORE_ROOT, else ../rust-fs-core, else the am-fs-core package
+#   `cargo metadata` resolves -- verifying `--version` and refusing loudly
+#   rather than falling back on anything local. A copy that lives here is a
+#   copy that drifts, and the family had several.
+#
+#   THE WRAPPER'S PIN IS NOT THE LIBRARY'S PIN. The wrapper ships from
+#   rust-fs-core v0.2.13; am-fs-core is pinned at v0.2.10 here for the reason
+#   AGENTS.md sets out. ci.yml therefore checks core out twice, once for each
+#   purpose, and tests/output_budget.rs holds the RESOLVER to its refusals.
 vars:
   TRIPLE: aarch64-apple-darwin
   # `[package].name` is am-img-vmdk; `[lib].name` is vmdk, so cargo writes
