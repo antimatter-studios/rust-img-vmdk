@@ -7,6 +7,24 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # WHERE scripts/tier.sh FINDS THE OUTPUT-BUDGET WRAPPER.
+  #
+  # The wrapper is rust-fs-core's and is no longer vendored here
+  # (rust-fs-core#153). It ships from v0.2.13 onwards, and THIS REPOSITORY
+  # CANNOT BUILD AGAINST v0.2.13 -- the am-fs-core pin is held at v0.2.10 for
+  # the reason AGENTS.md sets out at length (a write past the end of a
+  # FileDevice became a refusal, and appending a grain is how this format
+  # allocates). So the two things are checked out separately: ../rust-fs-core
+  # at the version the crate LINKS, and ../rust-fs-core-budget at the version
+  # whose shell script the tiers RUN. They are different concerns -- one is a
+  # Rust API, the other a command-line contract -- and pretending they are one
+  # number is what would force a broken bump.
+  #
+  # RELATIVE, NOT ${{ github.workspace }}: this job matrix includes
+  # windows-latest, where the workspace is a `D:\a\...` path and the tier
+  # scripts run under Git Bash, which cannot test or copy one. tier.sh
+  # resolves a relative FS_CORE_ROOT against the repository root.
+  FS_CORE_ROOT: ../rust-fs-core-budget
 
 jobs:
   test:
@@ -23,8 +41,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          # THE LIBRARY PIN. Cargo.toml resolves am-fs-core from this
+          # directory, and it is held at v0.2.10 deliberately -- AGENTS.md
+          # records the measurement and why raising it breaks this crate.
           ref: v0.2.10
           path: rust-fs-core
+      - uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          # THE WRAPPER PIN, WHICH IS NOT THE LIBRARY PIN. scripts/tier.sh
+          # reads scripts/output-budget.sh out of this checkout (FS_CORE_ROOT
+          # above) and nothing here is compiled or linked. v0.2.13 is the
+          # first release with the quiet-failure wrapper the family agreed
+          # on; the pin cannot go below it while the tiers read the wrapper
+          # from core, because v0.2.12 and earlier answer `--version`
+          # differently or not at all.
+          ref: v0.2.13
+          path: rust-fs-core-budget
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -39,8 +72,11 @@ jobs:
         working-directory: rust-img-vmdk
         # QUIET BY DEFAULT: the whole run goes to tmp/logs/debug.log and is
         # uploaded below; this step prints a verdict line and the
-        # executed-test count. A failure prints the tail of the log. See the
-        # measured budget table at the top of chores.yml, and scripts/tier.sh.
+        # executed-test count. A failure prints one line naming that log and
+        # exits with the suite's own status -- the tail is opt-in
+        # (OUTPUT_BUDGET_FAIL_TAIL), so the artefact below is how the whole
+        # run is read. See the measured budget table at the top of
+        # chores.yml, and scripts/tier.sh.
         #
         # EXPECT_OVERFLOW_CHECKS ARMS THE ONE CHECK A TEXT SCAN CANNOT DO.
         # This run has no `--release`, so overflow-checks are on, and it is
@@ -81,8 +117,9 @@ jobs:
           EXPECT_OVERFLOW_CHECKS: "1"
       - name: keep the tier log
         # `always()`, so the log survives the failure it exists to explain.
-        # A failing tier already prints its tail into this job log; this is
-        # what keeps the WHOLE run once the runner is gone.
+        # A failing tier prints one line naming this log and nothing else;
+        # this is what keeps the WHOLE run once the runner is gone, and it is
+        # the only way to read it.
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -119,8 +156,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          # THE LIBRARY PIN. Cargo.toml resolves am-fs-core from this
+          # directory, and it is held at v0.2.10 deliberately -- AGENTS.md
+          # records the measurement and why raising it breaks this crate.
           ref: v0.2.10
           path: rust-fs-core
+      - uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          # THE WRAPPER PIN, WHICH IS NOT THE LIBRARY PIN. scripts/tier.sh
+          # reads scripts/output-budget.sh out of this checkout (FS_CORE_ROOT
+          # above) and nothing here is compiled or linked. v0.2.13 is the
+          # first release with the quiet-failure wrapper the family agreed
+          # on; the pin cannot go below it while the tiers read the wrapper
+          # from core, because v0.2.12 and earlier answer `--version`
+          # differently or not at all.
+          ref: v0.2.13
+          path: rust-fs-core-budget
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -188,8 +240,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
+          # THE LIBRARY PIN. Cargo.toml resolves am-fs-core from this
+          # directory, and it is held at v0.2.10 deliberately -- AGENTS.md
+          # records the measurement and why raising it breaks this crate.
           ref: v0.2.10
           path: rust-fs-core
+      - uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          # THE WRAPPER PIN, WHICH IS NOT THE LIBRARY PIN. scripts/tier.sh
+          # reads scripts/output-budget.sh out of this checkout (FS_CORE_ROOT
+          # above) and nothing here is compiled or linked. v0.2.13 is the
+          # first release with the quiet-failure wrapper the family agreed
+          # on; the pin cannot go below it while the tiers read the wrapper
+          # from core, because v0.2.12 and earlier answer `--version`
+          # differently or not at all.
+          ref: v0.2.13
+          path: rust-fs-core-budget
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable

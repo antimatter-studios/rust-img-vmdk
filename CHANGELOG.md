@@ -187,6 +187,21 @@ never does.
 
 ### Changed
 
+- **The output-budget wrapper comes from `rust-fs-core`, and is no longer
+  vendored here.** `scripts/output-budget.sh` was a copy of
+  fs-linux-test-harness's, and a copy is a thing that drifts; it is deleted.
+  `scripts/tier.sh` now resolves the canonical script at run time —
+  `$FS_CORE_ROOT`, else `../rust-fs-core`, else the `am-fs-core` package
+  `cargo metadata` resolves — verifies it answers `--version` with
+  `rust-fs-core-output-budget 1`, copies it into `tmp/` for the run and
+  removes it afterwards. Anything unresolved or unverified is fatal: there is
+  no fallback to a local copy, because a silent fallback is how the copies
+  diverged in the first place. No digest is pinned; a SHA-256 repeated across
+  the family would have to be updated everywhere for any edit to the wrapper,
+  which is the lockstep this removes. `tests/output_budget.rs` now guards the
+  resolver — including its two refusals — rather than another repository's
+  script. The verbose switch is `OUTPUT_BUDGET_VERBOSE`, not `FLTH_VERBOSE`
+  (rust-fs-core#153).
 - `open_rw` refuses an image whose redundant grain directory does not fit
   inside the file. A read-only open still succeeds, since reads never
   consult it.
