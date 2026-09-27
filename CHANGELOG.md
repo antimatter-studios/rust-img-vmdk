@@ -209,6 +209,35 @@ never does.
 
 ### Changed
 
+- **`tests/changelog.rs` gains the release checks.** *(rust-img-qcow2#120)*
+  This repository had the first, three-assertion version — written for
+  #71, where `[Unreleased]` reached seven `### Fixed` headings and a review bot
+  reported it five times before anyone acted. The sibling `rust-img-vhdx` grew
+  it to six for rust-img-vhdx#63, and this brings the copies into line:
+
+  - `[package].version` equals the newest `## [x.y.z]` section;
+  - a released section carrying a breaking note bumped the **minor**;
+  - every released section has a `[x.y.z]: <url>` definition;
+  - the marker scan reads a break however it is spelled, and does not match
+    near-misses — this one exists because the first version matched `BREAKING`
+    case-sensitively and `rust-img-vhd` writes it lowercase, so the guard would
+    have let a break ship as a patch (rust-img-vhdx#128);
+  - the version parser reads a heading or skips it, never guesses.
+
+  Nothing to fix here: all six pass on this changelog as it stands. The two
+  repositories that lacked the guard were the two with duplicate headings, and
+  both have been corrected (rust-img-vhd#108, rust-img-qcow2#121).
+
+  **The pending release is a patch, and that is checked rather than assumed.**
+  Diffing the public surface since `v0.3.5` turns up one signature change —
+  `open_on_device` takes `Arc<dyn BlockRead>` where it took
+  `Arc<dyn BlockDevice>` — which reads like a break and is not: trait upcasting
+  coerces at the call site, so an expression a pre-change caller wrote still
+  compiles. Verified by compiling exactly that expression rather than by
+  reasoning about it. Everything else is an addition, and the new `GrainState`
+  variants are on a private enum.
+
+
 - **`fuzz/Cargo.toml` follows this crate's `am-fs-core` pin, and a test says
   so.** *(rust-img-qcow2#118)* The fuzz crate is a separate package with its own
   manifest and lockfile, so nothing about bumping the parent's dependency
