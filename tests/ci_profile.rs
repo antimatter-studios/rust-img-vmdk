@@ -897,6 +897,13 @@ fn without_the_tier_wrapper(words: &[String]) -> &[String] {
 /// `scripts/tier.sh` IS THE ONE EXCEPTION, and it is named rather than
 /// inferred: see [`without_the_tier_wrapper`].
 fn cargo_test_arguments(words: &[String]) -> Option<Vec<&str>> {
+    cargo_subcommand_arguments(words, "test")
+}
+
+/// [`cargo_test_arguments`] for any subcommand, so the same parsing serves
+/// `cargo clippy` without a second copy of it. `test` is the common case and
+/// keeps its own name.
+fn cargo_subcommand_arguments<'w>(words: &'w [String], subcommand: &str) -> Option<Vec<&'w str>> {
     let words = without_the_tier_wrapper(words);
     let mut words = words
         .iter()
@@ -907,7 +914,7 @@ fn cargo_test_arguments(words: &[String]) -> Option<Vec<&str>> {
         return None;
     }
     let mut rest = words.skip_while(|w| w.starts_with('+'));
-    if rest.next()? != "test" {
+    if rest.next()? != subcommand {
         return None;
     }
     // A REDIRECTION IS NOT AN ARGUMENT. `2>&1` would otherwise read as
@@ -4802,6 +4809,56 @@ fn installs_package(words: &[String], package: &str) -> bool {
     rest.iter().any(|w| *w == "install" || *w == "add") && rest.contains(&package)
 }
 
+/// True when `words` is a `cargo clippy` that both enables the feature and
+/// names the cross-validation target.
+///
+/// WITHOUT THIS STEP THE FILE IS LINTED BY NOTHING. `--all-targets` in the
+/// other jobs compiles it with the feature off, so every `qemu-img` call in
+/// it is `cfg`-ed away and clippy sees an empty file -- `-D warnings` is
+/// enforced on every other target in this repository and was not enforced on
+/// the crate's only independent oracle. The `required-features` entry in
+/// Cargo.toml is what takes it out of `--all-targets`, so the entry and this
+/// step are the same change: with the entry and without the step, nothing
+/// looks at the file at all.
+fn lints_the_cross_validation_target(words: &[String]) -> bool {
+    let Some(arguments) = cargo_subcommand_arguments(words, "clippy") else {
+        return false;
+    };
+    let mut selects_the_target = false;
+    let mut enables_the_feature = false;
+    let names_the_feature = |value: &str| value.split(',').any(|f| f == QEMU_FEATURE);
+    let mut expecting: Option<&str> = None;
+    for argument in arguments {
+        // Everything after `--` is clippy's own lint flags (`-D warnings`).
+        if argument == "--" {
+            break;
+        }
+        if let Some(option) = expecting.take() {
+            match option {
+                "--test" => selects_the_target |= argument == QEMU_TARGET,
+                _ => enables_the_feature |= names_the_feature(argument),
+            }
+            continue;
+        }
+        if let Some((option, value)) = argument.split_once('=') {
+            match option {
+                "--test" => selects_the_target |= value == QEMU_TARGET,
+                "--features" | "-F" => enables_the_feature |= names_the_feature(value),
+                _ => {}
+            }
+            continue;
+        }
+        if matches!(argument, "--test" | "--features" | "-F") {
+            expecting = Some(if argument == "--test" {
+                "--test"
+            } else {
+                "--features"
+            });
+        }
+    }
+    selects_the_target && enables_the_feature
+}
+
 /// Whether one tokenised command is the `cargo test` that runs the
 /// cross-validation suite: the target selected BY NAME and the feature
 /// that makes its bodies compile enabled.
@@ -4813,7 +4870,7 @@ fn installs_package(words: &[String], package: &str) -> bool {
 /// opens with `#![cfg(feature = "qemu-validation")]`, so if the
 /// `required-features` entry went away the target would build to an
 /// empty binary and report `0 passed` under the suite's own name. That
-/// is #50, and this is the assertion that the pair is still in place.
+/// is #116, and this is the assertion that the pair is still in place.
 ///
 /// `--all-features` counts as enabling it: it does.
 fn runs_the_cross_validation_target(words: &[String]) -> bool {
@@ -4943,6 +5000,19 @@ fn the_pr_gate_still_cross_validates_against_qemu_img() {
          0 having cross-validated nothing.",
         path.display()
     );
+    assert!(
+        commands
+            .iter()
+            .any(|words| lints_the_cross_validation_target(words)),
+        "the `{QEMU_JOB}` job in {} no longer runs `cargo clippy --features \
+         {QEMU_FEATURE} --test {QEMU_TARGET} -- -D warnings`, so nothing lints \
+         the cross-validation target at all. The `required-features` entry in \
+         Cargo.toml takes it out of `--all-targets` -- which is right, because \
+         `--all-targets` built it with the feature off and ran it empty -- and \
+         that leaves this job as the only place it is compiled with its bodies \
+         present. `-D warnings` is enforced on every other target here.",
+        path.display()
+    );
 }
 
 /// The scanner behind `the_pr_gate_still_cross_validates_against_qemu_img`,
@@ -4953,11 +5023,11 @@ fn the_pr_gate_still_cross_validates_against_qemu_img() {
 /// out while still looking like itself.
 mod cross_validation_job {
     use super::{
-        gating_job_named, installs_package, job_commands, runs_the_cross_validation_target,
-        QEMU_JOB, QEMU_PACKAGE,
+        gating_job_named, installs_package, job_commands, lints_the_cross_validation_target,
+        runs_the_cross_validation_target, QEMU_JOB, QEMU_PACKAGE,
     };
 
-    /// The job as `ci.yml` has it, reduced to the three facts the guard
+    /// The job as `ci.yml` has it, reduced to the four facts the guard
     /// reads. Every case below is this with one thing changed.
     const CONTROL: &str = "\
 on:
@@ -4971,12 +5041,15 @@ jobs:
       - name: qemu cross-validation tests
         run: |
           cargo test --locked --features qemu-validation --test qemu_validation
+      - name: clippy (qemu cross-validation tests)
+        run: cargo clippy --locked --features qemu-validation --test qemu_validation -- -D warnings
 ";
 
-    /// `(job found, installs, runs the target)` for a workflow.
-    fn verdict(workflow: &str) -> (bool, bool, bool) {
+    /// `(job found, installs, runs the target, lints the target)` for a
+    /// workflow.
+    fn verdict(workflow: &str) -> (bool, bool, bool, bool) {
         let Some(job) = gating_job_named(workflow, QEMU_JOB) else {
-            return (false, false, false);
+            return (false, false, false, false);
         };
         let commands = job_commands(&job);
         (
@@ -4987,12 +5060,15 @@ jobs:
             commands
                 .iter()
                 .any(|words| runs_the_cross_validation_target(words)),
+            commands
+                .iter()
+                .any(|words| lints_the_cross_validation_target(words)),
         )
     }
 
     #[test]
     fn the_control_shape_satisfies_every_half() {
-        assert_eq!(verdict(CONTROL), (true, true, true));
+        assert_eq!(verdict(CONTROL), (true, true, true, true));
     }
 
     #[test]
@@ -5000,7 +5076,7 @@ jobs:
         let without_a_name = CONTROL.replace("    name: qemu-validation\n", "");
         assert_eq!(
             verdict(&without_a_name),
-            (true, true, true),
+            (true, true, true, true),
             "Actions reports a job with no `name:` under its key, so the guard \
              has to as well"
         );
@@ -5012,7 +5088,7 @@ jobs:
         // still find it -- and the required context, which names the
         // RENDERED name, would have stopped reporting.
         let renamed = CONTROL.replace("    name: qemu-validation\n", "    name: qemu\n");
-        assert_eq!(verdict(&renamed), (false, false, false));
+        assert_eq!(verdict(&renamed), (false, false, false, false));
     }
 
     #[test]
@@ -5021,19 +5097,19 @@ jobs:
             "  qemu-validation:\n",
             "  qemu-validation:\n    if: github.event_name == 'push'\n",
         );
-        assert_eq!(verdict(&conditional), (false, false, false));
+        assert_eq!(verdict(&conditional), (false, false, false, false));
 
         let tolerated = CONTROL.replace(
             "  qemu-validation:\n",
             "  qemu-validation:\n    continue-on-error: true\n",
         );
-        assert_eq!(verdict(&tolerated), (false, false, false));
+        assert_eq!(verdict(&tolerated), (false, false, false, false));
     }
 
     #[test]
     fn a_workflow_that_no_longer_gates_pull_requests_does_not_count() {
         let pushes_only = CONTROL.replace("  pull_request:\n", "  push:\n");
-        assert_eq!(verdict(&pushes_only), (false, false, false));
+        assert_eq!(verdict(&pushes_only), (false, false, false, false));
     }
 
     #[test]
@@ -5044,7 +5120,7 @@ jobs:
         );
         assert_eq!(
             verdict(&conditional),
-            (true, false, true),
+            (true, false, true, true),
             "an `if:` on the install step means the gate does not depend on it"
         );
     }
@@ -5055,7 +5131,7 @@ jobs:
             "sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils",
             "sudo apt-get update",
         );
-        assert_eq!(verdict(&only_update), (true, false, true));
+        assert_eq!(verdict(&only_update), (true, false, true, true));
     }
 
     #[test]
@@ -5064,7 +5140,7 @@ jobs:
             "--no-install-recommends qemu-utils",
             "--no-install-recommends qemu-system-x86",
         );
-        assert_eq!(verdict(&other), (true, false, true));
+        assert_eq!(verdict(&other), (true, false, true, true));
     }
 
     #[test]
@@ -5073,7 +5149,7 @@ jobs:
             "        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils\n",
             "        run: |\n          # sudo apt-get install -y qemu-utils\n          sudo apt-get update\n",
         );
-        assert_eq!(verdict(&commented), (true, false, true));
+        assert_eq!(verdict(&commented), (true, false, true, true));
     }
 
     #[test]
@@ -5092,18 +5168,25 @@ jobs:
             );
             assert_eq!(
                 verdict(&workflow),
-                (true, true, true),
+                (true, true, true, true),
                 "`{command}` does install the package"
             );
         }
     }
+
+    // THE FOUR CASES BELOW MUTATE BOTH COMMANDS, and the expectation says
+    // so. `--features qemu-validation --test qemu_validation` appears in the
+    // `cargo test` step and in the `cargo clippy` step, so a `replace` of
+    // either half lands on both -- which is honest: a workflow edited that
+    // way has neither run nor linted the target. The lint scanner gets cases
+    // of its own further down, where only the clippy step moves.
 
     #[test]
     fn a_target_selected_without_the_feature_builds_nothing() {
         let featureless = CONTROL.replace("--features qemu-validation ", "");
         assert_eq!(
             verdict(&featureless),
-            (true, true, false),
+            (true, true, false, false),
             "the [[test]] entry requires the feature, so cargo would not build \
              the target at all"
         );
@@ -5112,13 +5195,13 @@ jobs:
     #[test]
     fn the_feature_without_the_target_is_some_other_selection() {
         let unnamed = CONTROL.replace("--test qemu_validation", "--all-targets");
-        assert_eq!(verdict(&unnamed), (true, true, false));
+        assert_eq!(verdict(&unnamed), (true, true, false, false));
     }
 
     #[test]
     fn another_targets_name_is_not_this_targets_name() {
         let elsewhere = CONTROL.replace("--test qemu_validation", "--test synthetic");
-        assert_eq!(verdict(&elsewhere), (true, true, false));
+        assert_eq!(verdict(&elsewhere), (true, true, false, false));
     }
 
     #[test]
@@ -5129,7 +5212,79 @@ jobs:
         // `required-features` entry -- and the option spelling is what
         // tells them apart.
         let filtered = CONTROL.replace("--test qemu_validation", "qemu_validation");
-        assert_eq!(verdict(&filtered), (true, true, false));
+        assert_eq!(verdict(&filtered), (true, true, false, false));
+    }
+
+    // ------------------------------------------------------------------
+    // The lint step on its own (#110). Only the clippy line moves in these,
+    // so the run stays true and the lint is what the case is about.
+    // ------------------------------------------------------------------
+
+    const CLIPPY: &str = "cargo clippy --locked --features qemu-validation --test qemu_validation";
+
+    #[test]
+    fn no_clippy_step_at_all_is_an_unlinted_target() {
+        let gone = CONTROL.replace(
+            "      - name: clippy (qemu cross-validation tests)\n        run: cargo clippy \
+             --locked --features qemu-validation --test qemu_validation -- -D warnings\n",
+            "",
+        );
+        assert_eq!(
+            verdict(&gone),
+            (true, true, true, false),
+            "the clippy step is gone and the guard did not notice"
+        );
+    }
+
+    #[test]
+    fn clippy_over_every_target_does_not_lint_this_one() {
+        // `--all-targets` is what the other jobs already run, and it
+        // compiles this file with the feature OFF -- an empty file. It is
+        // the spelling most likely to be reached for as a replacement.
+        let all = CONTROL.replace(CLIPPY, "cargo clippy --locked --all-targets");
+        assert_eq!(verdict(&all), (true, true, true, false));
+    }
+
+    #[test]
+    fn clippy_on_the_target_without_the_feature_lints_an_empty_file() {
+        let featureless = CONTROL.replace(CLIPPY, "cargo clippy --locked --test qemu_validation");
+        assert_eq!(verdict(&featureless), (true, true, true, false));
+    }
+
+    #[test]
+    fn clippy_with_the_feature_but_another_target_is_not_this_one() {
+        let elsewhere = CONTROL.replace(
+            CLIPPY,
+            "cargo clippy --locked --features qemu-validation --test synthetic",
+        );
+        assert_eq!(verdict(&elsewhere), (true, true, true, false));
+    }
+
+    #[test]
+    fn a_lint_flag_is_not_a_cargo_argument() {
+        // Everything after `--` is clippy's own, where `--features` would
+        // be a lint name and not a feature.
+        let after = CONTROL.replace(
+            CLIPPY,
+            "cargo clippy --locked --test qemu_validation -- --features qemu-validation",
+        );
+        assert_eq!(verdict(&after), (true, true, true, false));
+    }
+
+    #[test]
+    fn the_spellings_that_really_lint_it_still_count() {
+        for command in [
+            "cargo clippy --locked --features=qemu-validation --test=qemu_validation -- -D warnings",
+            "cargo clippy -F qemu-validation --test qemu_validation -- -D warnings",
+            "cargo clippy --features a,qemu-validation --test qemu_validation -- -D warnings",
+        ] {
+            let workflow = CONTROL.replace(CLIPPY, command);
+            assert_eq!(
+                verdict(&workflow),
+                (true, true, true, true),
+                "`{command}` does lint the cross-validation target"
+            );
+        }
     }
 
     #[test]
@@ -5148,7 +5303,7 @@ jobs:
             );
             assert_eq!(
                 verdict(&workflow),
-                (true, true, true),
+                (true, true, true, true),
                 "`{command}` does run the cross-validation suite"
             );
         }
@@ -5162,7 +5317,7 @@ jobs:
             "cargo test --locked --features qemu-validation --test qemu_validation",
             "cargo test --locked --test qemu_validation -- --features qemu-validation",
         );
-        assert_eq!(verdict(&harness), (true, true, false));
+        assert_eq!(verdict(&harness), (true, true, false, true));
     }
 }
 

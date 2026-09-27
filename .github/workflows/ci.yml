@@ -248,6 +248,21 @@ jobs:
         run: |
           bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation
           bash scripts/test-floor.sh qemu 23
+      # LINTED WHERE IT IS BUILT, AND ONLY HERE CAN IT BE.
+      #
+      # The `clippy` step in the `test` job runs `--all-targets`, which reads
+      # as "everything" and is not: a `required-features` target is not built
+      # unless the feature is on. So every qemu-img call and assertion in this
+      # file was cfg-ed away and clippy saw an empty file. `-D warnings` is
+      # enforced on every other target in this repository and was not enforced
+      # on the crate's only independent oracle (#113).
+      #
+      # This step and the `required-features` entry in Cargo.toml go together:
+      # with the entry and without this, the file would be neither run nor
+      # linted by anything except the one `cargo test` above (#116).
+      - name: clippy (qemu cross-validation tests)
+        working-directory: rust-img-vmdk
+        run: cargo clippy --locked --features qemu-validation --test qemu_validation -- -D warnings
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4

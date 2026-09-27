@@ -47,6 +47,31 @@ saphyr = "0.0.12"
 serde_json = "1"
 toml = "1.1.5"
 
+# TAKEN OUT OF `--all-targets`, AND THAT IS THE POINT.
+#
+# tests/qemu_validation.rs opens with `#![cfg(feature = "qemu-validation")]`,
+# so with the feature off the whole binary is empty. Without this entry
+# `cargo test --locked --all-targets` -- the debug matrix and the release
+# job -- built it, ran it and printed
+#
+#     Running tests/qemu_validation.rs
+#     test result: ok. 0 passed; 0 failed; ...
+#
+# a passing line under the cross-validation suite's own name, for a run that
+# validated nothing. `0 passed` and `26 passed` read the same to anyone
+# scanning, and the executed-test floor cannot tell them apart either: it
+# sums `passed` counts, and a zero adds nothing.
+#
+# `required-features` makes cargo skip the target instead, so the line is
+# ABSENT rather than green. tests/feature_gated_targets.rs holds every
+# feature-gated test target to having one, and the `qemu-validation` job --
+# which names both halves, `--features qemu-validation --test
+# qemu_validation` -- is unaffected. See #116.
+[[test]]
+name = "qemu_validation"
+path = "tests/qemu_validation.rs"
+required-features = ["qemu-validation"]
+
 [profile.release]
 lto = true
 codegen-units = 1
