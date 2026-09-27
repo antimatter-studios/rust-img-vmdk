@@ -84,8 +84,8 @@ jobs:
         # selects nothing, a build that produced no test binaries, or a
         # `tests/` directory that stopped being compiled all report the same
         # green as a full run -- and the empty run is also the one that fits
-        # its output budget best. That is the "fake coverage" the audit in
-        # antimatter-studios/diskjockey#197 was opened for. Measured
+        # its output budget best. That is the "fake coverage" a CI audit across
+        # the sibling repositories was opened for. Measured
         # 2026-09-17 on run 35174300791 (main, 15aa277): 211 executed on each
         # of the three legs; this branch runs 250. The floor is
         # 230, about ten percent below, and it moves UP with the suite
@@ -226,6 +226,15 @@ jobs:
         # CI here does not install chore -- a guard wired only into a task
         # nothing runs is a guard that reports protection it is not providing.
         run: scripts/agents-core-check.sh
+      # The shell tests, by glob, so a guard added later needs no edit here.
+      - name: script tests (tests/scripts/*.sh)
+        working-directory: rust-img-vmdk
+        run: |
+          set -euo pipefail
+          for t in tests/scripts/*.sh; do
+            echo "== $t"
+            bash "$t"
+          done
 
   # Cross-validates our reader/writer against `qemu-img`. qemu-img is
   # invoked as a subprocess only — never linked, never bundled. The

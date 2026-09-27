@@ -14,7 +14,7 @@
 # `test / ubuntu-latest`, `test / macos-latest`, `test / windows-latest`,
 # `test (release)` and `qemu-validation` — lived only in the repository
 # settings page, typed in by hand, with no diff, no author and no reviewer.
-# They were correct on the day: the audit in antimatter-studios/diskjockey#197
+# They were correct on the day: a CI audit across the sibling repositories
 # checked, and the check-runs on main's HEAD and on the newest pull_request
 # check-suite were exactly those six, all success. The sibling rust-img-qcow2
 # was already in the state that follows from not checking, producing a
