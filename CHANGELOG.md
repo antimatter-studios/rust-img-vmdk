@@ -209,6 +209,28 @@ never does.
 
 ### Changed
 
+- **`fuzz/Cargo.toml` follows this crate's `am-fs-core` pin, and a test says
+  so.** *(rust-img-qcow2#118)* The fuzz crate is a separate package with its own
+  manifest and lockfile, so nothing about bumping the parent's dependency
+  pointed at the child's: this one required `0.2.10` while the crate required
+  `0.2.13`, and `fuzz.yml` already checked core out at `v0.2.13`.
+
+  It was green throughout, which is the problem. `version = "0.2.10"` is a caret
+  requirement that `0.2.13` satisfies, the `path` source is what cargo actually
+  uses, and `cargo fuzz run` is not passed `--locked`, so the stale
+  `fuzz/Cargo.lock` was rewritten in place on every run. The day core reaches
+  `0.3.0` the parent resolves and the fuzz crate does not — and that surfaces
+  in a nightly cron, naming a version requirement rather than the bump behind
+  it.
+
+  `the_fuzz_crate_requires_the_same_core_as_this_one` in
+  `tests/fuzz_decoders.rs` compares the two manifests' `version` fields. It
+  refuses a bare `path` dependency too, since one passes every other check in
+  that file while saying nothing about which core it is for. Both failure modes
+  were confirmed to fail before the fix went in.
+
+  All four image crates had drifted, in three different ways.
+
 - **The qemu cross-validation target is gated by its feature, and linted.**
   *(#113, #116)* `tests/qemu_validation.rs` opens with
   `#![cfg(feature = "qemu-validation")]` and `Cargo.toml` had no `[[test]]`
