@@ -730,6 +730,22 @@ impl VmdkReader {
             .map_err(fs_core_to_vmdk_error)
     }
 
+    /// Extend the backing device to `new_len` bytes.
+    ///
+    /// Through `writable`, like every other mutation: `dev` is the read
+    /// half and `BlockRead` has no such method. On a read-write open the
+    /// two fields hold the same `Arc` -- `open_rw` and
+    /// `open_rw_on_device` both clone one device into both -- which is
+    /// what makes `file_extent` able to trust `dev.size_bytes()` again
+    /// once this has been called.
+    fn dev_set_len(&self, new_len: u64) -> Result<()> {
+        self.writable
+            .as_ref()
+            .ok_or(Error::ReadOnly)?
+            .set_len(new_len)
+            .map_err(fs_core_to_vmdk_error)
+    }
+
     /// Read exactly `buf.len()` bytes starting at virtual `offset`.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         let len = buf.len() as u64;
@@ -1259,23 +1275,26 @@ impl VmdkReader {
         self.dev_flush()
     }
 
+    /// How far the file reaches now.
+    ///
+    /// THE DEVICE'S OWN ANSWER, and it used to not be. This read
+    /// `size_bytes().max(alloc_cursor * SECTOR_SIZE)`, because a
+    /// `FileDevice`'s declared size was the length taken when the file
+    /// was opened and the tail grew underneath it on every allocation --
+    /// so the device and the file disagreed about where the file ended,
+    /// and the cursor was the only honest answer.
+    ///
+    /// `allocate_sectors` calls `set_len` now (#121), which moves the
+    /// declared size with the file, so `size_bytes()` is authoritative
+    /// again and the `max()` would be comparing a number against itself.
+    /// Two answers to one question is how they come to differ.
+    fn file_extent(&self) -> u64 {
+        self.dev.size_bytes()
+    }
+
     /// Allocate `n_sectors` worth of host space at the device tail and
     /// return the starting sector. The cursor is bumped under lock so
     /// concurrent allocations don't collide.
-    /// How far the file reaches now.
-    ///
-    /// `FileDevice::size_bytes` is the length read when the file was
-    /// opened and never changes again, so on a writable image it stops
-    /// being the file's length the first time a grain or a grain table
-    /// is allocated at the tail. The allocation cursor is where the
-    /// writer has reached, so the later of the two is the real extent.
-    fn file_extent(&self) -> u64 {
-        let cursor = *self.alloc_cursor.lock().unwrap();
-        self.dev
-            .size_bytes()
-            .max(cursor.saturating_mul(SECTOR_SIZE))
-    }
-
     fn allocate_sectors(&self, n_sectors: u64) -> Result<u64> {
         let mut cur = self.alloc_cursor.lock().unwrap();
         let start = *cur;
@@ -1290,6 +1309,23 @@ impl VmdkReader {
                 "image grew past u32 sector addressable range",
             ));
         }
+
+        // ASK FOR THE ROOM HERE, WHICH IS WHY THERE IS ONLY ONE CALL.
+        //
+        // Three writes land at the tail -- the full-grain zero-init and
+        // the payload in `allocate_and_write`, and the fresh table in
+        // `allocate_blank_grain_table` -- and every one of them is
+        // reached through this function, the crate's declared allocation
+        // cursor. `write_at` refuses a write ending past `size_bytes()`
+        // (rust-fs-core#70, #75), so the extension has to be asked for
+        // (rust-fs-core#161) and this is the one place that knows how far.
+        //
+        // UNDER THE CURSOR LOCK, AND BEFORE THE CURSOR MOVES. The lock is
+        // what serialises allocation; extending inside it means two
+        // allocators cannot hand out the same tail, and a refused
+        // extension leaves the cursor where it was rather than pointing
+        // at space the device does not have.
+        self.dev_set_len(new_end.saturating_mul(SECTOR_SIZE))?;
         *cur = new_end;
         Ok(start)
     }
@@ -1844,6 +1880,19 @@ impl fs_core::BlockDevice for VmdkReader {
 
     fn is_writable(&self) -> bool {
         VmdkReader::is_writable(self)
+    }
+
+    /// SPELLED OUT RATHER THAN DEFAULTED, so the answer is a decision and
+    /// not an omission.
+    ///
+    /// The device this exposes is the GUEST disk, `virtual_size()` long,
+    /// and that number is the header's `capacity` -- growing it means
+    /// rewriting the header and the grain directory sized from it, which
+    /// is nothing a caller can ask for by writing past the end. The image
+    /// file grows all the time; the disk inside it does not. `set_len`
+    /// keeps its default, `Err(ReadOnly)`.
+    fn can_grow(&self) -> bool {
+        false
     }
 }
 

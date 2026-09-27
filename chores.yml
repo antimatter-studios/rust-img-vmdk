@@ -93,10 +93,11 @@ chore_min_version: 0.6.0
 #   rather than falling back on anything local. A copy that lives here is a
 #   copy that drifts, and the family had several.
 #
-#   THE WRAPPER'S PIN IS NOT THE LIBRARY'S PIN. The wrapper ships from
-#   rust-fs-core v0.2.13; am-fs-core is pinned at v0.2.10 here for the reason
-#   AGENTS.md sets out. ci.yml therefore checks core out twice, once for each
-#   purpose, and tests/output_budget.rs holds the RESOLVER to its refusals.
+#   ONE PIN NOW, WHERE THERE WERE TWO. The wrapper ships from rust-fs-core
+#   v0.2.13, and am-fs-core was pinned at v0.2.10 here -- so ci.yml checked
+#   core out twice, once for each purpose. #121 moved the library pin to
+#   v0.2.13, so one checkout serves both and `../rust-fs-core` is the candidate
+#   that answers. tests/output_budget.rs holds the RESOLVER to its refusals.
 vars:
   TRIPLE: aarch64-apple-darwin
   # `[package].name` is am-img-vmdk; `[lib].name` is vmdk, so cargo writes
