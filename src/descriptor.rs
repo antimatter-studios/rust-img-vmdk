@@ -10,7 +10,9 @@
 //! - The parent linkage: `parentFileNameHint` / `parentCID`. A snapshot
 //!   delta or linked clone is `monolithicSparse` like any other image, so
 //!   the parent linkage is the only thing that says the data isn't all
-//!   here. See [`declares_parent`].
+//!   here. `declares_parent` in this module decides it. Named rather than
+//!   linked: it is private, and a link from a public page to a private item
+//!   renders as plain text, promising documentation a reader cannot reach.
 //! - `ddb.*` lines (geometry, etc.) are ignored.
 
 use crate::error::{Error, Result};

@@ -1,7 +1,7 @@
 //! VMDK read + write path. Currently handles the **monolithic sparse**
 //! variant (single-file VMDK with embedded descriptor + grain directory +
 //! grain tables). Other variants are reported as
-//! [`Error::Unsupported`](crate::Error::Unsupported) so the caller can
+//! [`crate::Error::Unsupported`] so the caller can
 //! either fall back or surface a clear message.
 //!
 //! ## Backing storage
@@ -1048,7 +1048,7 @@ impl VmdkReader {
     /// Write to the image. Behaviour by grain state:
     ///
     /// - **Allocated grain**: direct write at the host offset.
-    /// - **Sparse grain (gt[gte] == 0) inside an allocated GT**: allocate
+    /// - **Sparse grain (`gt[gte] == 0`) inside an allocated GT**: allocate
     ///   a fresh grain at the device tail, zero-pad it, write the user
     ///   payload at the in-grain offset, then update the GT entry.
     /// - **Sparse grain whose GT is itself unallocated**: allocate a new

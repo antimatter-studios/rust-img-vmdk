@@ -44,6 +44,28 @@ never does.
 
 ### Fixed
 
+- **The public docs build, and CI runs rustdoc.** Nothing here built the docs,
+  and `cargo build`, `cargo test` and `cargo clippy` all ignore intra-doc
+  links, so a link to a private item or to something renamed away was
+  invisible to every gate this repository has. Three errors on `main`:
+
+  - `src/descriptor.rs` linked `[declares_parent]`, which is private — a link
+    from a public page to a private item renders as plain text, promising
+    documentation a reader cannot reach.
+  - `src/reader.rs` wrote `gt[gte]` in prose, which rustdoc read as a link to
+    an item named `gte`. It is code, so it is in backticks now.
+  - `src/reader.rs`'s module doc gave `[Error::Unsupported]` an explicit target
+    the shortcut already resolved.
+
+  The gate is in the `fmt` job with `RUSTDOCFLAGS: -D warnings` — rustdoc's
+  default is to warn and carry on, which is how a page ships with its links
+  dead and no failure anywhere. The sibling `rust-img-qcow2` reached eight
+  errors this way (qcow2#105), and fixing those surfaced seven more, because
+  rustdoc stops at the first failing pass and the errors mask each other.
+
+  That job needed `../rust-fs-core` checked out for the first time: `cargo doc`
+  resolves the path dependency even though `cargo fmt` does not.
+
 - **Grain pointers are checked against every metadata region, not a
   floor.** The guard was one scalar floor: grain tables above it could be
   read as guest data and overwritten by a write, and an `rgd_offset`
