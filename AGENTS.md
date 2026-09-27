@@ -167,41 +167,44 @@ which a trailing `rgd_offset` could lift over every grain (#63).
 `tests/changelog.rs` fails on duplicate `### Added` headings under one version.
 Add your entry under the heading that is already there.
 
-## The pin you cannot bump, and why
+## How this format allocates, and the one place it asks for room
 
-This crate depends on `am-fs-core` and is **pinned to `v0.2.10`**, one release
-behind, and that is deliberate.
+Appending is the only way a monolithicSparse VMDK allocates: put the grain, or
+the grain table, at the file's tail and then record where it went. That used to
+work because a write past the end of a `FileDevice` grew the file underneath
+it — and rust-fs-core#75 made it a refusal, correctly: `size_bytes()` reported
+the construction-time length while the file grew, so `CachingDevice` could
+serve bytes no cached read could reach (rust-fs-core#70). The `am-fs-core` pin
+sat at `v0.2.10` for six releases because of it, with 12 failing write tests
+waiting behind the bump — the largest count of the four image crates.
 
-`4e19fc9` (rust-fs-core#75) made a write past the end of a `FileDevice` a
-refusal rather than an implicit extension. It was right to — `size_bytes()`
-reported the construction-time length while the file grew underneath it, so
-`CachingDevice` could serve bytes no cached read could reach (#70). But writing
-past the end was **the only way this format allocates**: append a block, cluster
-or grain, then record where it went.
+`BlockDevice::set_len` (rust-fs-core#161) is the replacement, and there is
+**exactly one call**, in `VmdkReader::allocate_sectors`. Three writes land at
+the tail — the full-grain zero-init and the payload in `allocate_and_write`,
+and the fresh table in `allocate_blank_grain_table` — and all three are reached
+through that function, which is the crate's declared allocation cursor. Adding
+it at the write sites instead would be three calls saying the same thing.
 
-Measured against core `main`: vhd 7 failures, qcow2 3, vhdx 1, vmdk 1; zero
-against `v0.2.10`. Every one is a write landing exactly at the device's current
-end.
+It is called **under the cursor lock and before the cursor moves**. The lock is
+what serialises allocation, so extending inside it means two allocators cannot
+be handed the same tail; asking before the cursor moves means a refusal leaves
+the cursor describing the device that is really there.
 
-Do **not** bump the pin, and do **not** "fix" it by reverting #75 — that
-reintroduces #70. Tracked as rust-fs-core#147/#129 and, on this side, as #89,
-#117 and #121; the agreed replacement is `BlockDevice::set_len` plus
-`can_grow()`. Measured again on 2026-09-26 against core `v0.2.13`:
-`write_into_sparse_grain_persists_across_reopen` fails with `OutOfBounds {
-offset: 69120, len: 65536, size: 69120 }`, and the rest of the suite passes.
-`set_len` exists in core now; nothing here calls it yet.
+**`file_extent()` is `dev.size_bytes()` again.** It used to be
+`size_bytes().max(alloc_cursor * SECTOR_SIZE)`, because the device's declared
+length stopped being the file's the first time anything was appended — its own
+doc comment said so. `set_len` moves the declared length with the file, so the
+`max()` became a number compared against itself. Two answers to one question is
+how they come to differ.
 
-This pin is **not** the one the output-budget wrapper is read from — see the
-section below, which is why the bump that migration wanted did not have to
-happen here.
+`VmdkReader`'s own `impl BlockDevice` answers `can_grow() == false`
+explicitly. The image file grows constantly; the **guest disk** does not — its
+length is the header's `capacity`, so changing it means rewriting the header and
+the grain directory sized from it, not writing past the end.
 
-One practical consequence: `pre-commit.d/rust-clippy.sh` runs clippy without
-`--locked`, so a `../rust-fs-core` checkout that is semver-ahead of the pin
-rewrites your unstaged `Cargo.lock`, and `rust-deps-pinned.sh` then blocks the
-commit over a file the commit never contained. That is a livelock
-(agent-skills#64). Work from a throwaway worktree with `../rust-fs-core` at
-`v0.2.10` rather than reaching for `--no-verify`, which disables every guard at
-once.
+Both trait methods are **defaulted** to a refusal, so a wrapping device that
+does not forward them turns a growable device into one that cannot allocate.
+`StallingDevice` and `CountingFlushes` in `tests/write.rs` forward both.
 
 ## The output-budget wrapper is rust-fs-core's, and is resolved at run time
 
@@ -233,15 +236,14 @@ migration removed. The version string moves when the behaviour moves.
 The wrapper is copied to `tmp/output-budget.$$.sh` for the run and removed by a
 trap, so nothing accumulates an untracked copy.
 
-**Two pins of rust-fs-core, and they are different numbers.** `ci.yml` checks
-core out twice: `../rust-fs-core` at `v0.2.10`, which is what the crate LINKS
-(see the section above — that pin cannot move yet), and
-`../rust-fs-core-budget` at `v0.2.13`, whose shell script the tiers RUN, with
-`FS_CORE_ROOT: ../rust-fs-core-budget`. A Rust API and a command-line contract
-are separate concerns; insisting they be one number is what would force the
-broken bump. Locally: either keep `../rust-fs-core` current enough to ship the
-wrapper, or set `FS_CORE_ROOT` at a checkout that does — a throwaway worktree
-arranged for the `v0.2.10` build will not have it, and `tier.sh` will say so.
+**One pin of rust-fs-core now, where there were two.** `ci.yml` checked core
+out twice: `../rust-fs-core` at `v0.2.10`, what the crate LINKS, and
+`../rust-fs-core-budget` at `v0.2.13`, whose shell script the tiers RUN, named
+by `FS_CORE_ROOT`. A Rust API and a command-line contract really are separate
+concerns, and insisting they be one number would have forced a broken bump —
+but #121 moved the library pin to the number the tooling already needed, so
+there is one checkout, at `v0.2.13`, and **no `FS_CORE_ROOT`**: `tier.sh` finds
+the wrapper in the sibling, which is candidate 2 above (#123).
 
 `OUTPUT_BUDGET_VERBOSE=1` (or `chore test -- --verbose`) streams a run;
 `OUTPUT_BUDGET_FAIL_TAIL=40` asks a failing tier for a tail, which it no longer

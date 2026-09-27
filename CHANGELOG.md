@@ -187,6 +187,53 @@ never does.
 
 ### Changed
 
+- **Allocation asks the device for room instead of writing past its end, and
+  the `am-fs-core` pin moves to v0.2.13.** *(#89, #117, #121, #123)*
+  Appending is the only way a monolithicSparse VMDK allocates, and it worked
+  because a write past the end of a `FileDevice` grew the file underneath it.
+  rust-fs-core#75 made that a refusal — rightly, since `size_bytes()` went on
+  reporting the length taken at construction while the file grew
+  (rust-fs-core#70) — and the pin sat six releases behind because of it.
+  Measured: **12 failures** against core v0.2.13, 0 against v0.2.10, the
+  largest count of the four image crates.
+
+  `BlockDevice::set_len` (rust-fs-core#161) is called in **exactly one
+  place**, `VmdkReader::allocate_sectors`. Three writes land at the tail — the
+  full-grain zero-init and the payload in `allocate_and_write`, and the fresh
+  table in `allocate_blank_grain_table` — and all three reach it through that
+  function, which is the crate's declared allocation cursor. It is called
+  under the cursor lock and **before** the cursor moves, so two allocators
+  cannot be handed the same tail and a refusal leaves the cursor describing
+  the device that is really there.
+
+- **`VmdkReader::file_extent` is the device's own answer again.** It read
+  `size_bytes().max(alloc_cursor * SECTOR_SIZE)`, because a `FileDevice`'s
+  declared length stopped being the file's the first time a grain or a table
+  was appended — its own doc comment said so. `set_len` moves the declared
+  length with the file, so the `max()` compared a number against itself. Two
+  answers to one question is how they come to differ; `file_extent` is the EOF
+  bound in `redundant_gt_sector` and elsewhere, so this is a correctness
+  simplification rather than a tidy-up.
+
+- **`VmdkReader` answers `can_grow() == false` where it is exposed as a
+  `BlockDevice`.** The image file grows constantly; the guest disk does not.
+  Its length is the header's `capacity`, so changing it means rewriting the
+  header and the grain directory sized from it — not writing past the end.
+  Spelled out rather than left to the default, so the answer is a decision.
+
+  `set_len` and `can_grow` are **defaulted** to a refusal on the trait, so a
+  wrapping device that omits them turns a growable device into one that cannot
+  allocate. `StallingDevice` and `CountingFlushes` in `tests/write.rs` forward
+  both; without the second of those,
+  `a_write_flushes_only_where_the_ordering_needs_it` fails on the first grain
+  it allocates rather than on its flush count.
+
+- **`ci.yml` checks `rust-fs-core` out once, and `FS_CORE_ROOT` is gone.**
+  There were two checkouts at two refs — v0.2.10 for the library and v0.2.13
+  for `scripts/output-budget.sh`, which the tiers run. Both are v0.2.13 now,
+  so `tier.sh` finds the wrapper in `../rust-fs-core`, the sibling candidate
+  it looks at second. `release.yml` and `fuzz.yml` move with it (#123).
+
 - **The output-budget wrapper comes from `rust-fs-core`, and is no longer
   vendored here.** `scripts/output-budget.sh` was a copy of
   fs-linux-test-harness's, and a copy is a thing that drifts; it is deleted.

@@ -1288,6 +1288,17 @@ impl BlockDevice for StallingDevice {
     fn is_writable(&self) -> bool {
         self.inner.is_writable()
     }
+    // A PASS-THROUGH WRAPPER HAS TO PASS THESE THROUGH TOO. Both are
+    // defaulted on the trait -- `set_len` to `Err(ReadOnly)`, `can_grow`
+    // to `false` -- so a double that omits them is not transparent: it
+    // turns a device that can allocate into one that cannot. This one
+    // stalls a write; that is all it means to change.
+    fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+        self.inner.set_len(new_len)
+    }
+    fn can_grow(&self) -> bool {
+        self.inner.can_grow()
+    }
 }
 
 /// A flush lowers `uncleanShutdown`, which says "the writes are
@@ -1445,6 +1456,20 @@ impl BlockDevice for CountingFlushes {
     fn is_writable(&self) -> bool {
         self.inner.is_writable()
     }
+    // Forwarded for the same reason as `StallingDevice`'s, and this one
+    // was measurably needed: without it the allocation under test cannot
+    // extend the file, and `a_write_flushes_only_where_the_ordering_needs_it`
+    // fails on the first grain it allocates rather than on its flush count.
+    //
+    // AND `set_len` IS NOT A FLUSH. It is not counted -- the assertion is
+    // about the barriers the crash-safety order needs, and an extension is
+    // not one of them.
+    fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+        BlockDevice::set_len(&self.inner, new_len)
+    }
+    fn can_grow(&self) -> bool {
+        BlockDevice::can_grow(&self.inner)
+    }
 }
 
 /// A write issues only the device flushes its crash-safety order needs:
@@ -1495,4 +1520,162 @@ fn a_write_flushes_only_where_the_ordering_needs_it() {
     r.read_at(0, &mut back).unwrap();
     assert!(back[..grain].iter().all(|&b| b == 0x22));
     assert!(back[grain..].iter().all(|&b| b == 0x33));
+}
+
+// ---------------------------------------------------------------------------
+// The file grows because it was asked to, not because a write ran off the end
+// (#89, #117, #121)
+// ---------------------------------------------------------------------------
+
+/// AN ALLOCATION EXTENDS THE FILE, AND THE DEVICE KNOWS IT DID.
+///
+/// Allocating a grain appends it, and that used to work because a write past
+/// the end of a `FileDevice` grew the file underneath it. rust-fs-core#75
+/// made that a refusal — rightly, since `size_bytes()` went on reporting the
+/// length taken at construction while the file grew (rust-fs-core#70) — so
+/// `allocate_sectors` asks with `set_len` now.
+///
+/// Two claims, and the second is what let `file_extent` stop guessing:
+///
+/// 1. the file on disk really is longer afterwards, by at least the grain;
+/// 2. the device's own `size_bytes()` says so, without being told.
+///
+/// Before the fix (2) was false by construction, which is why `file_extent`
+/// carried `max(size_bytes(), alloc_cursor * SECTOR_SIZE)` — two answers to
+/// one question, kept in step by hand.
+#[test]
+fn an_allocation_extends_the_file_and_the_device_reports_the_new_length() {
+    let path = tmp_path("alloc_extends");
+    let pattern = vec![0x5Au8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+
+    let before = std::fs::metadata(&*path).unwrap().len();
+    let dev = Arc::new(FileDevice::open_rw(&*path).unwrap());
+    assert!(
+        BlockDevice::can_grow(&*dev),
+        "the fixture's own FileDevice cannot grow, so this test proves nothing"
+    );
+    assert_eq!(
+        BlockRead::size_bytes(&*dev),
+        before,
+        "the device disagreed with the file about its length before any write"
+    );
+
+    let r = VmdkReader::open_rw_on_device(dev.clone()).unwrap();
+    // Grain 1 is sparse in this fixture, so this write allocates.
+    let virt = GRAIN_SIZE * SECTOR;
+    r.write_at(virt + 100, &[0xC3u8; 200]).unwrap();
+    r.flush().unwrap();
+
+    let grain_bytes = GRAIN_SIZE * SECTOR;
+    let after = std::fs::metadata(&*path).unwrap().len();
+    assert!(
+        after >= before + grain_bytes,
+        "a grain was allocated but the file grew by only {} bytes",
+        after - before
+    );
+    assert_eq!(
+        BlockRead::size_bytes(&*dev),
+        after,
+        "the device's declared size stopped tracking the file it is open on, \
+         which is the disagreement `file_extent` used to work around"
+    );
+
+    // And the allocated grain reads back, which it cannot do if the file is
+    // short of where the grain table now points.
+    let mut got = [0u8; 200];
+    r.read_at(virt + 100, &mut got).unwrap();
+    assert_eq!(got, [0xC3u8; 200]);
+}
+
+/// A DEVICE THAT CANNOT GROW REFUSES THE ALLOCATION, RATHER THAN THE WRITE
+/// FAILING SOMEWHERE INSIDE IT.
+///
+/// `set_len` is defaulted to `Err(ReadOnly)`, so this is every device that
+/// has not opted in — including a wrapper that forgot to forward it.
+/// `allocate_sectors` asks before it moves the cursor, so the refusal leaves
+/// the cursor describing the device that is really there: nothing is
+/// published, and the grain table still says the grain is sparse.
+#[test]
+fn an_allocation_on_a_device_that_cannot_grow_is_refused_and_publishes_nothing() {
+    /// Writable, and pointedly not growable: `set_len` and `can_grow` are
+    /// left at their defaults.
+    struct NoGrowth(FileDevice);
+    impl BlockRead for NoGrowth {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+            self.0.read_at(offset, buf)
+        }
+        fn size_bytes(&self) -> u64 {
+            BlockRead::size_bytes(&self.0)
+        }
+    }
+    impl BlockDevice for NoGrowth {
+        fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+            self.0.write_at(offset, buf)
+        }
+        fn flush(&self) -> fs_core::Result<()> {
+            self.0.flush()
+        }
+        fn is_writable(&self) -> bool {
+            true
+        }
+    }
+
+    let path = tmp_path("no_growth");
+    let pattern = vec![0x5Au8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+    let before = std::fs::metadata(&*path).unwrap().len();
+
+    let dev: Arc<dyn BlockDevice> = Arc::new(NoGrowth(FileDevice::open_rw(&*path).unwrap()));
+    assert!(
+        !dev.can_grow(),
+        "the double reported that it can grow, so it is not the case under test"
+    );
+
+    let r = VmdkReader::open_rw_on_device(dev).unwrap();
+    let virt = GRAIN_SIZE * SECTOR;
+    r.write_at(virt + 100, &[0xC3u8; 200])
+        .expect_err("a device that cannot grow accepted an allocating write");
+    drop(r);
+
+    assert_eq!(
+        std::fs::metadata(&*path).unwrap().len(),
+        before,
+        "the refused allocation extended the file anyway"
+    );
+    assert_eq!(
+        read_grain_sector_value(&path, GT_OFF_SECTOR as u32, 1),
+        0,
+        "the grain table names a grain the refused allocation never made"
+    );
+}
+
+/// A VMDK EXPOSED AS A BLOCK DEVICE DOES NOT GROW THE DISK INSIDE IT.
+///
+/// The image file grows on every allocation; the guest disk does not. Its
+/// length is the header's `capacity`, so changing it means rewriting the
+/// header and the grain directory sized from it — not writing past the end.
+/// `can_grow` would answer `false` by default, which is why it is asserted:
+/// the default and the decision have to be the same answer on purpose.
+#[test]
+fn a_vmdk_does_not_offer_to_grow_the_disk_inside_it() {
+    let path = tmp_path("no_virtual_growth");
+    let pattern = vec![0x5Au8; (GRAIN_SIZE * SECTOR) as usize];
+    build_grain0_only(&path, &pattern);
+
+    let r = VmdkReader::open_rw(&*path).unwrap();
+    assert!(
+        !BlockDevice::can_grow(&r),
+        "a VMDK offered to grow the guest disk"
+    );
+    let virtual_size = BlockRead::size_bytes(&r);
+    assert!(
+        BlockDevice::set_len(&r, virtual_size + GRAIN_SIZE * SECTOR).is_err(),
+        "set_len on a VMDK reported success without the guest disk changing size"
+    );
+    assert_eq!(
+        BlockRead::size_bytes(&r),
+        virtual_size,
+        "the guest disk's size moved"
+    );
 }
