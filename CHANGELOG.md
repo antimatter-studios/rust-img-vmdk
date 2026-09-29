@@ -8,6 +8,10 @@ never does.
 
 ### Added
 
+- Releases carry a build-provenance attestation: the published `.crate` is
+  attached to the GitHub release for its tag, checked first against the
+  crates.io checksum, and verifiable with `gh attestation verify` (see the
+  README, "Verifying a release").
 - **The sparse header and text descriptor parsers are fuzzed, on two
   tiers.** VMDK is two parsers that fail differently — the binary header
   carries `grain_size`, `num_gtes_per_gt`, `gd_offset` and `capacity`,
