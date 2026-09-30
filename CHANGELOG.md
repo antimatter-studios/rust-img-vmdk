@@ -30,6 +30,12 @@ never does.
   attached to the GitHub release for its tag, checked first against the
   crates.io checksum, and verifiable with `gh attestation verify` (see the
   README, "Verifying a release").
+- Releases attach the command-line tool as a tarball per platform
+  (`darwin-arm64`, `linux-x86_64`), laid out as an install prefix
+  (`bin/rust-img-vmdk`, `bin/img.vmdk` linked to it, man pages and
+  completions under `share/`, `share/rust-img-vmdk/CAVEATS`, `LICENSE`) and
+  attested with build provenance like the `.crate`. CI builds the tarball and
+  checks its layout on every pull request.
 - **The sparse header and text descriptor parsers are fuzzed, on two
   tiers.** VMDK is two parsers that fail differently — the binary header
   carries `grain_size`, `num_gtes_per_gt`, `gd_offset` and `capacity`,
