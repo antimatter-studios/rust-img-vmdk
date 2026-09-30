@@ -263,7 +263,7 @@ out twice: `../rust-fs-core` at `v0.2.10`, what the crate LINKS, and
 by `FS_CORE_ROOT`. A Rust API and a command-line contract really are separate
 concerns, and insisting they be one number would have forced a broken bump —
 but #121 moved the library pin to the number the tooling already needed, so
-there is one checkout, at `v0.2.13`, and **no `FS_CORE_ROOT`**: `tier.sh` finds
+there is one checkout, at `v0.2.14`, and **no `FS_CORE_ROOT`**: `tier.sh` finds
 the wrapper in the sibling, which is candidate 2 above (#123).
 
 `OUTPUT_BUDGET_VERBOSE=1` (or `chore test -- --verbose`) streams a run;
