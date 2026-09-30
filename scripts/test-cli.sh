@@ -52,6 +52,9 @@ for oracle in qemu-img qemu-io; do
         refuse "$oracle is not on PATH; it is the independent oracle every image is checked against. Install it: \`brew install qemu\`, or \`apt-get install qemu-utils\`."
 done
 
+command -v man >/dev/null 2>&1 ||
+    refuse "man is not on PATH; tests/cli/test-docs.sh asks it to find each installed page. Install it: \`apt-get install man-db\`."
+
 entry="$(command -v rust-img-vmdk 2>/dev/null || true)"
 [ -n "$entry" ] || refuse "rust-img-vmdk is not on PATH: $INSTALL."
 answer="$(rust-img-vmdk --version 2>/dev/null || true)"
