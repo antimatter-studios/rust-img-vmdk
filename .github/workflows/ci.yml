@@ -51,7 +51,10 @@ jobs:
           workspaces: rust-img-vmdk
       - name: build
         working-directory: rust-img-vmdk
-        run: cargo build --locked --all-targets
+        # `--features cli` so the command-line tool (the `rust-img-vmdk`
+        # target, which requires it) is built, tested and linted on every
+        # leg, not only in the `cli` job below.
+        run: cargo build --locked --all-targets --features cli
       - name: test
         working-directory: rust-img-vmdk
         # QUIET BY DEFAULT: the whole run goes to tmp/logs/debug.log and is
@@ -95,7 +98,7 @@ jobs:
         # and the default shell on windows-latest is PowerShell.
         shell: bash
         run: |
-          bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets
+          bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli
           bash scripts/test-floor.sh debug 225
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
@@ -113,7 +116,7 @@ jobs:
           retention-days: 7
       - name: clippy
         working-directory: rust-img-vmdk
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --features cli -- -D warnings
 
   # THE PROFILE THAT SHIPS IS NOT THE PROFILE THE TESTS RUN IN.
   #
@@ -167,7 +170,7 @@ jobs:
         # pipes, so the status on the floor line is the suite's own.
         shell: bash
         run: |
-          bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets
+          bash scripts/tier.sh "test (release)" release 460 28000 -- cargo test --locked --release --all-targets --features cli
           bash scripts/test-floor.sh release 225
       - name: keep the tier log
         if: always()
@@ -310,6 +313,65 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # THE COMMAND-LINE TOOL AS INSTALLED, found on PATH rather than as a
+  # cargo target: `scripts/cli-install.sh` builds it in release mode and
+  # stages it as an install prefix (the real `rust-img-vmdk` and
+  # `img.vmdk` a relative symlink to it), then `scripts/test-cli.sh` runs
+  # `rust-img-vmdk doctor` first and every tests/cli/test-*.sh after it.
+  # A change that breaks the tool fails the pull request, not the release.
+  #
+  # The oracle is qemu-img on the runner, as in `qemu-validation`: no VM.
+  # The scripts are run directly rather than through `chore cli:install` and
+  # `chore test:cli`, because CI here does not install chore; chores.yml
+  # runs the same two commands with the same budget and floor, which
+  # tests/ci_profile.rs holds the two files to.
+  cli:
+    name: cli (the installed tool, on PATH)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-img-vmdk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rust-img-vmdk
+      - uses: actions/checkout@v4
+        with:
+          repository: antimatter-studios/rust-fs-core
+          # One checkout, the library AND the output-budget wrapper. See the
+          # `test` job above for why it used to be two.
+          ref: v0.2.13
+          path: rust-fs-core
+      - name: install qemu-utils and jq
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-img-vmdk
+      - name: build and stage the tool (chore cli:install)
+        run: scripts/cli-install.sh
+      - name: the staged tool first on PATH
+        run: scripts/cli-install.sh --print-bin-dir >> "$GITHUB_PATH"
+      - name: the cli tier (chore test:cli)
+        # Measured on 2026-09-30 on the Mac: 20 lines, 699 bytes, 218
+        # checks executed. The budget leaves room for the runner's longer
+        # paths, which appear in the doctor and PATH lines; the floor is
+        # about 95% of the count, and moves up with the suite.
+        shell: bash
+        run: |
+          bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh
+          bash scripts/test-floor.sh cli 207
+      - name: keep the tier log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-cli
+          path: rust-img-vmdk/tmp/logs/
+          if-no-files-found: warn
+          retention-days: 7
+
   # ONE CHECK GATES A MERGE, AND IT STANDS FOR EVERY JOB IN THIS FILE (#111).
   #
   # Branch protection names checks, and a check is a job name, so the
@@ -354,7 +416,7 @@ jobs:
   # `ci-ok` and nothing else.
   ci-ok:
     name: ci-ok
-    needs: [test, test-release, fmt, qemu-validation]
+    needs: [test, test-release, fmt, qemu-validation, cli]
     if: always()
     runs-on: ubuntu-latest
     steps:

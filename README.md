@@ -53,11 +53,39 @@ src/
   descriptor.rs  embedded text descriptor parser
   reader.rs      VmdkReader — open, BlockRead/BlockDevice impls
   capi.rs        C ABI returning FsCoreDevice handles
+  cli/           img.vmdk / rust-img-vmdk, behind the `cli` feature
 tests/
   synthetic.rs   hand-built fixtures
 include/
   vmdk.h         C ABI header
 ```
+
+## Command line
+
+`img.vmdk <image> <verb>` reports and reads a VMDK image without a
+hypervisor. It is one multi-call binary, `rust-img-vmdk`, with `img.vmdk` a
+link to it; `rust-img-vmdk img ...` is the same program under the one name
+nothing else on `PATH` can shadow, and `rust-img-vmdk doctor` says whether
+the `img.vmdk` on `PATH` is this one. Build it with the `cli` feature (the
+library alone gains no dependency from it):
+
+```sh
+chore cli:install                         # or: cargo build --release --features cli
+img.vmdk disk.vmdk info                   # JSON; --text for people
+img.vmdk disk.vmdk read -o disk.raw       # the whole virtual disk, as a raw image
+img.vmdk disk.vmdk read --offset 0 --length 512 | xxd
+```
+
+Metadata is JSON by default, led by the keys every `img.<fmt>` tool shares
+(`format`, `virtual_size`, `block_size`, `backing`, `dirty`) with the
+format's own under `vmdk`. A failure is `{"error": "...", "code": N}` on
+stderr, `N` being the exit status: 1 failed, 2 wrong command line, 3 not
+implemented. It reads what the library reads, monolithicSparse and
+streamOptimized; any other layout answers `not implemented` naming its
+create type. `create`, `resize` and `set` exist and answer `not
+implemented`: the library has no creator and no resize.
+
+`chore test:cli` tests the tool as installed, against `qemu-img`.
 
 ## Spec
 

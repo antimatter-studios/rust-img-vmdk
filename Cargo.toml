@@ -15,7 +15,24 @@ exclude = ["fuzz"]
 name = "vmdk"
 crate-type = ["staticlib", "rlib"]
 
+# THE COMMAND-LINE TOOL: one multi-call binary, named for the repository.
+# It dispatches on argv[0], so the release step installs it once as
+# `rust-img-vmdk` and links `img.vmdk` to it (cargo refuses a dot in a
+# target name, so the dotted name is never cargo's). `rust-img-vmdk img
+# ...` is the form nothing else on PATH can shadow, and `cargo run
+# --features cli -- img disk.vmdk info` works before anything is installed.
+#
+# BEHIND THE `cli` FEATURE, so the static library a consumer links gains no
+# dependency from the tool: `required-features` keeps the target out of a
+# build that did not ask for it.
+[[bin]]
+name = "rust-img-vmdk"
+path = "src/cli/main.rs"
+required-features = ["cli"]
+
 [features]
+# The command-line tool and nothing else. clap is MIT/Apache-2.0.
+cli = ["dep:clap"]
 # Enables the qemu-img cross-validation test binary. Off by default so
 # `cargo test` does not require qemu-img on PATH. CI installs qemu-utils
 # and runs `cargo test --features qemu-validation --test qemu_validation`
@@ -25,6 +42,10 @@ qemu-validation = []
 
 [dependencies]
 am-fs-core = { path = "../rust-fs-core", version = "0.2.13" }
+# The command-line tool's argument parser, behind the `cli` feature (see the
+# `rust-img-vmdk` target above). No derive: the builder API keeps the tool's
+# command a function the man pages and completions can be made from.
+clap = { version = "4.5", optional = true, default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
 # zlib inflation for stream-optimized grains (#48). The pure-Rust
 # miniz_oxide backend: MIT/Apache-2.0, and no C in the build.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

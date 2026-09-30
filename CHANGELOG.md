@@ -8,6 +8,17 @@ never does.
 
 ### Added
 
+- **`img.vmdk`, the command-line tool**, one multi-call binary named
+  `rust-img-vmdk` behind a new `cli` feature (clap, MIT/Apache-2.0), so the
+  static library gains no dependency. `img.vmdk <image> info`/`get [key]`
+  reports the image as JSON (`--text` for people), and `read [--offset N]
+  [--length N] [-o FILE]` streams the guest's raw bytes, compressed grains
+  inflated, the whole virtual disk when no range is given. A flat, split or
+  VMFS layout, and a child image, answer `not implemented` (exit 3) naming
+  the create type, as do `create` (no creator in the library), `resize` and
+  `set`, and `write` until its verb lands. `rust-img-vmdk doctor` checks
+  that the `img.vmdk` on `PATH` is this one. `chore test:cli` tests the
+  installed tool against `qemu-img`, and CI runs it on every pull request.
 - Releases carry a build-provenance attestation: the published `.crate` is
   attached to the GitHub release for its tag, checked first against the
   crates.io checksum, and verifiable with `gh attestation verify` (see the

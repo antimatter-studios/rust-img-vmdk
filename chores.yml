@@ -49,21 +49,31 @@ chore_min_version: 0.6.0
 #   largest of the three matrix legs in each case.
 #
 #     tier     measured        budget         headroom, and why
-#     debug      305 / 19,303    400 / 27,000  ~31% / ~40%: 250 executed
+#     debug      353 / 21,990    400 / 27,000  ~12% / ~19%: 280 executed
 #                                              tests at one line each. The
 #                                              job has a separate build step,
 #                                              so no `Compiling` lines land
 #                                              here
-#     release    305 / 19,303    400 / 27,000  the same selection in the other
-#                                              profile. The job has no
-#                                              separate build step, so a cold
-#                                              cache puts ~70 `Compiling`
-#                                              lines in this tier too
+#     release    397 / 23,919    460 / 28,000  ~14% / ~15%: the same selection
+#                                              in the other profile. The job
+#                                              has no separate build step, so
+#                                              a cold cache puts ~45
+#                                              `Compiling` lines in this tier
+#                                              too
 #     qemu        34 /  2,125    120 /  9,000  26 cross-validated images, plus
 #                                              the cold-cache compile of a
 #                                              target nothing else builds --
 #                                              the feature gate keeps it out
 #                                              of `--all-targets`
+#     cli         20 /    699     35 /  1,300  the installed tool: one line
+#                                              per test file and its verdict,
+#                                              and doctor's report. Paths are
+#                                              longer on a runner
+#
+#   Re-measured 2026-09-30 on the Mac when the `cli` feature joined the debug
+#   and release tiers, at 280 executed tests: debug warm, release from a
+#   cold target directory, so its row carries the compile. The release
+#   budget was raised with that measurement: 397 lines had reached 400.
 #
 #   Raise one DELIBERATELY when a tier grows, the way the executed-test
 #   floors are raised -- and raise it in .github/workflows/ci.yml at the same
@@ -216,8 +226,13 @@ tasks:
       - task: test:debug
       - task: test:release
       - task: test:qemu
+      # The command-line tool, built and staged from this checkout, then
+      # tested as installed. A separate invocation because test:cli reads
+      # PATH, and the staged directory has to come first on it.
+      - task: cli:install
+      - 'PATH="$(scripts/cli-install.sh --print-bin-dir):$PATH" "{{.CHORE_EXE}}" test:cli'
       # THE LAST LINE: one number across the tiers, and where the detail is.
-      - bash scripts/test-verdict.sh debug release qemu
+      - bash scripts/test-verdict.sh debug release qemu cli
 
   test:debug:
     desc: 'The suite in the debug profile, where overflow checks are on'
@@ -228,7 +243,7 @@ tasks:
     # Do not add `--release` here; tests/ci_profile.rs refuses a
     # workflow with no such run, and the reason is the same one (#77).
     cmds:
-      - 'EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets'
+      - 'EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli'
       - 'bash scripts/test-floor.sh debug 225'
 
   test:release:
@@ -238,7 +253,7 @@ tasks:
     # computation passes the debug run for the WRONG reason. See the note
     # on the `test-release` job in .github/workflows/ci.yml.
     cmds:
-      - 'bash scripts/tier.sh "test (release)" release 400 27000 -- cargo test --locked --release --all-targets'
+      - 'bash scripts/tier.sh "test (release)" release 460 28000 -- cargo test --locked --release --all-targets --features cli'
       - 'bash scripts/test-floor.sh release 225'
 
   test:qemu:
@@ -251,6 +266,31 @@ tasks:
     cmds:
       - 'bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation'
       - 'bash scripts/test-floor.sh qemu 23'
+
+  cli:install:
+    desc: 'Build the command-line tool (release, --features cli) and stage it as an install prefix: tmp/cli/bin/rust-img-vmdk, and img.vmdk a relative symlink to it'
+    # The layout an install has. It prints the PATH line; `test:cli` tests
+    # whatever PATH finds, so that directory goes first.
+    cmds: ['scripts/cli-install.sh']
+
+  test:cli:
+    desc: 'The command-line tool AS INSTALLED, found on PATH: doctor first, then every tests/cli/test-*.sh against qemu-img'
+    # Tests the installed artifact, not a cargo target: the same suite
+    # checks `chore cli:install`'s staging (`chore test` puts it first on
+    # PATH) and a Homebrew install. `rust-img-vmdk doctor` runs before any
+    # tool is tested and fails the tier if a name is missing or shadowed,
+    # naming the fix; a missing qemu-img, qemu-io or jq fails it too. See
+    # scripts/test-cli.sh.
+    #
+    # BUDGET AND FLOOR, measured 2026-09-30 on the Mac: 20 lines, 699
+    # bytes, 218 checks executed when the tier was added with the read
+    # verbs. (Each file prints `test result: ok. N passed`, which
+    # test-floor.sh sums as it does cargo's.) The budget leaves room for a
+    # runner's longer paths in the doctor and PATH lines; the floor is about
+    # 95% of the count. The `cli` job in ci.yml carries the same numbers.
+    cmds:
+      - 'bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh'
+      - 'bash scripts/test-floor.sh cli 207'
 
   clean:
     desc: Remove this crate's cargo output
@@ -287,7 +327,7 @@ tasks:
       - scripts/agents-core-check.sh
       - task: test:scripts
       - cargo fmt --check
-      - cargo clippy --locked --all-targets -- -D warnings
+      - cargo clippy --locked --all-targets --features cli -- -D warnings
 
   test:scripts:
     desc: The shell tests (tests/scripts/*.sh), every one by glob
