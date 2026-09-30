@@ -19,7 +19,6 @@ not_implemented() {
 
 not_implemented "resize" img.vmdk disk.vmdk resize 16M
 not_implemented "set" img.vmdk disk.vmdk set backing base.vmdk
-not_implemented "write" img.vmdk disk.vmdk write --offset 0 </dev/null
 not_implemented "create" img.vmdk new.vmdk create 8M
 same "no refused verb changed the image" disk.vmdk before.vmdk
 check "the refused create made no file" test ! -e new.vmdk

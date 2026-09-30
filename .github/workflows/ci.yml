@@ -356,13 +356,14 @@ jobs:
         run: scripts/cli-install.sh --print-bin-dir >> "$GITHUB_PATH"
       - name: the cli tier (chore test:cli)
         # Measured on 2026-09-30 on the Mac: 20 lines, 699 bytes, 218
-        # checks executed. The budget leaves room for the runner's longer
+        # checks executed; 23 lines, 781 bytes, 319 checks with `write`.
+        # The budget leaves room for the runner's longer
         # paths, which appear in the doctor and PATH lines; the floor is
         # about 95% of the count, and moves up with the suite.
         shell: bash
         run: |
           bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh
-          bash scripts/test-floor.sh cli 207
+          bash scripts/test-floor.sh cli 303
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4

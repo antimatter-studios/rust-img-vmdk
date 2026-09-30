@@ -16,7 +16,10 @@ never does.
   inflated, the whole virtual disk when no range is given. A flat, split or
   VMFS layout, and a child image, answer `not implemented` (exit 3) naming
   the create type, as do `create` (no creator in the library), `resize` and
-  `set`, and `write` until its verb lands. `rust-img-vmdk doctor` checks
+  `set`. `write --offset N` writes stdin into a monolithicSparse image,
+  refusing input that would run past the end of the virtual disk, and the
+  image as its own input, before writing any of it; a streamOptimized image
+  answers `not implemented`, its grains being compressed and append-only. `rust-img-vmdk doctor` checks
   that the `img.vmdk` on `PATH` is this one. `chore test:cli` tests the
   installed tool against `qemu-img`, and CI runs it on every pull request.
 - Releases carry a build-provenance attestation: the published `.crate` is

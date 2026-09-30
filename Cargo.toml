@@ -102,3 +102,11 @@ panic = "unwind"
 [profile.dev]
 opt-level = 1
 panic = "unwind"
+
+# `img.vmdk write`'s refusals against the built binary. Needs the
+# `rust-img-vmdk` target, which needs `cli`; the debug and release tiers
+# pass `--features cli`, so they build and run it.
+[[test]]
+name = "cli_write"
+path = "tests/cli_write.rs"
+required-features = ["cli"]
