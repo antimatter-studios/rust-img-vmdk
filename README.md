@@ -62,7 +62,7 @@ include/
 
 ## Command line
 
-`img.vmdk <image> <verb>` reports and reads a VMDK image without a
+`img.vmdk <image> <verb>` reports, reads and writes a VMDK image without a
 hypervisor. It is one multi-call binary, `rust-img-vmdk`, with `img.vmdk` a
 link to it; `rust-img-vmdk img ...` is the same program under the one name
 nothing else on `PATH` can shadow, and `rust-img-vmdk doctor` says whether
@@ -74,6 +74,7 @@ chore cli:install                         # or: cargo build --release --features
 img.vmdk disk.vmdk info                   # JSON; --text for people
 img.vmdk disk.vmdk read -o disk.raw       # the whole virtual disk, as a raw image
 img.vmdk disk.vmdk read --offset 0 --length 512 | xxd
+img.vmdk disk.vmdk write --offset 0 < mbr.bin
 ```
 
 Metadata is JSON by default, led by the keys every `img.<fmt>` tool shares
@@ -82,7 +83,9 @@ format's own under `vmdk`. A failure is `{"error": "...", "code": N}` on
 stderr, `N` being the exit status: 1 failed, 2 wrong command line, 3 not
 implemented. It reads what the library reads, monolithicSparse and
 streamOptimized; any other layout answers `not implemented` naming its
-create type. `create`, `resize` and `set` exist and answer `not
+create type. `write` writes a monolithicSparse image, allocating grains
+and grain tables as it needs them; a streamOptimized image answers `not
+implemented`. `create`, `resize` and `set` exist and answer `not
 implemented`: the library has no creator and no resize.
 
 `chore test:cli` tests the tool as installed, against `qemu-img`.

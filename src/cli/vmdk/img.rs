@@ -15,7 +15,7 @@
 //! create type named, and this tool passes that on as `not implemented`.
 
 use std::ffi::OsString;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{value_parser, Arg, ArgMatches, Command as Cmd};
@@ -104,11 +104,17 @@ fn command() -> Cmd {
         )
         .subcommand(
             Cmd::new("write")
-                .about("Write the bytes on stdin into the guest at an offset (not implemented yet)")
+                .about("Write the bytes on stdin into the guest at an offset")
                 .arg(byte_count("offset", "Where to write, in the guest").required(true))
                 .after_help(
-                    "Examples:\n  img.vmdk disk.vmdk write --offset 0 < mbr.bin\n\n\
-                     Answers `not implemented` (exit 3) in this version.",
+                    "Examples:\n  img.vmdk disk.vmdk write --offset 0 < mbr.bin\n  \
+                     img.vmdk src.vmdk read | img.vmdk dst.vmdk write --offset 0\n  \
+                     printf 'hello' | img.vmdk disk.vmdk write --offset 1M\n\n\
+                     Input that would run past the end of the virtual disk is refused before \
+                     anything is written. Grains and grain tables are allocated as the write \
+                     needs, and both grain directories are kept in step. A streamOptimized \
+                     image answers `not implemented` (exit 3): its grains are compressed and \
+                     cannot be rewritten in place.",
                 ),
         )
         .subcommand(
@@ -186,9 +192,11 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             sub.get_one::<u64>("length").copied(),
             sub.get_one::<OsString>("output").map(PathBuf::from),
         ),
-        "write" => Err(CliError::not_implemented(
-            "write: this version of img.vmdk does not write yet",
-        )),
+        "write" => write(
+            image,
+            *sub.get_one::<u64>("offset")
+                .expect("clap requires the offset"),
+        ),
         "create" => Err(CliError::not_implemented(
             "create: this library has no VMDK image creator",
         )),
@@ -373,6 +381,145 @@ fn read(
         }
     }
     Ok(Outcome::done())
+}
+
+/// What `write` reads its bytes from.
+enum Input {
+    /// A regular file redirected onto stdin: its length is known before a
+    /// byte is read, so the bounds are checked first and it is streamed.
+    File(std::fs::File, u64),
+    /// A pipe or a terminal: read whole, at most one byte more than fits,
+    /// so input that does not fit is refused before anything is written.
+    Buffered(Vec<u8>),
+}
+
+/// Stdin as a regular file, when it is one.
+#[cfg(unix)]
+fn stdin_file() -> Option<std::fs::File> {
+    use std::os::fd::AsFd;
+    let fd = std::io::stdin().as_fd().try_clone_to_owned().ok()?;
+    let file = std::fs::File::from(fd);
+    file.metadata().ok().filter(|m| m.is_file()).map(|_| file)
+}
+
+/// Elsewhere stdin is always read as a pipe. Measured on Windows: a pipe's
+/// handle answers `metadata()` as a file of the bytes queued so far, so a
+/// pipe would be taken for a file and its length checked before it was full.
+#[cfg(not(unix))]
+fn stdin_file() -> Option<std::fs::File> {
+    None
+}
+
+/// Whether `input` is the file at `image`: an image written from itself
+/// grows as it is read, each cluster it allocates landing where the next
+/// read comes from.
+#[cfg(unix)]
+fn is_same_file(input: &std::fs::File, image: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (input.metadata(), std::fs::metadata(image)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_same_file(_input: &std::fs::File, _image: &Path) -> bool {
+    false
+}
+
+/// A write the library refuses by what the image is (a streamOptimized
+/// image, whose grains are compressed and append-only) is a verb it cannot
+/// do; anything else failed.
+fn write_error(image: &Path, e: vmdk::Error) -> CliError {
+    match e {
+        vmdk::Error::Unsupported(why) => {
+            CliError::not_implemented(format!("write: {}: {why}", image.display()))
+        }
+        other => vmdk_error(image, other),
+    }
+}
+
+/// Write everything on stdin into the guest at `offset`.
+///
+/// Everything that can be refused is refused before the first byte is
+/// written: an image the library will not write, input that would run past
+/// the end of the virtual disk, and the image itself redirected onto stdin.
+fn write(image: &Path, offset: u64) -> Result<Outcome, CliError> {
+    let r = VmdkReader::open_rw(image).map_err(|e| write_error(image, e))?;
+    let size = r.virtual_size();
+    if offset > size {
+        return Err(CliError::failed(format!(
+            "--offset {offset} is past the end of the {size}-byte virtual disk"
+        )));
+    }
+    let room = size - offset;
+    let stdin_error = |e: std::io::Error| CliError::failed(format!("read stdin: {e}"));
+    let input = match stdin_file() {
+        Some(mut file) => {
+            if is_same_file(&file, image) {
+                return Err(CliError::failed(format!(
+                    "{}: stdin is the image being written",
+                    image.display()
+                )));
+            }
+            let len = file.metadata().map_err(stdin_error)?.len();
+            let at = file.stream_position().map_err(stdin_error)?;
+            let n = len.saturating_sub(at);
+            if n > room {
+                return Err(CliError::failed(format!(
+                    "{n} bytes at {offset} run past the end of the {size}-byte virtual disk"
+                )));
+            }
+            Input::File(file, n)
+        }
+        None => {
+            let mut data = Vec::new();
+            std::io::stdin()
+                .lock()
+                .take(room.saturating_add(1))
+                .read_to_end(&mut data)
+                .map_err(stdin_error)?;
+            if data.len() as u64 > room {
+                return Err(CliError::failed(format!(
+                    "stdin holds more than the {room} bytes from {offset} to the end of the \
+                     {size}-byte virtual disk"
+                )));
+            }
+            Input::Buffered(data)
+        }
+    };
+    let written = match input {
+        Input::Buffered(data) => {
+            for (i, chunk) in data.chunks(CHUNK).enumerate() {
+                r.write_at(offset + (i * CHUNK) as u64, chunk)
+                    .map_err(|e| write_error(image, e))?;
+            }
+            data.len() as u64
+        }
+        Input::File(file, n) => {
+            // No further than the length just checked, whatever the file
+            // does while it is read.
+            let mut file = file.take(n);
+            let mut buf = vec![0u8; CHUNK];
+            let mut at = offset;
+            loop {
+                let got = file.read(&mut buf).map_err(stdin_error)?;
+                if got == 0 {
+                    break;
+                }
+                r.write_at(at, &buf[..got])
+                    .map_err(|e| write_error(image, e))?;
+                at += got as u64;
+            }
+            at - offset
+        }
+    };
+    r.flush().map_err(|e| vmdk_error(image, e))?;
+    let report = Json::object([
+        ("offset", Json::from(offset)),
+        ("bytes", Json::from(written)),
+    ]);
+    Ok(Outcome::report(report).with_text(format!("wrote {written} bytes at {offset}")))
 }
 
 #[cfg(test)]
