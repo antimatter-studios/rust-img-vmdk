@@ -21,13 +21,13 @@ use std::path::{Path, PathBuf};
 use clap::{value_parser, Arg, ArgMatches, Command as Cmd};
 use vmdk::VmdkReader;
 
-use crate::common::{CliError, Json, Outcome, Tool};
+use fs_core::cli::{CliError, Json, Outcome, Tool};
 
 pub const TOOL: Tool = Tool {
     name: "img.vmdk",
     verb: "img",
     section: 1,
-    usage_exit: crate::common::output::EXIT_USAGE,
+    usage_exit: fs_core::cli::output::EXIT_USAGE,
     about: "Report, read and write a VMDK disk image without a hypervisor",
     command,
     run,
@@ -67,7 +67,7 @@ fn command() -> Cmd {
                 .value_parser(value_parser!(OsString))
                 .required(true),
         )
-        .args(crate::common::format_args().map(|a| a.global(true)))
+        .args(fs_core::cli::format_args().map(|a| a.global(true)))
         .subcommand_required(true)
         .subcommand(key_command(
             "info",
@@ -542,7 +542,7 @@ mod tests {
         let p = Path::new("x.vmdk");
         assert_eq!(
             vmdk_error(p, vmdk::Error::Unsupported("a split sparse extent")).code,
-            crate::common::output::EXIT_UNSUPPORTED
+            fs_core::cli::output::EXIT_UNSUPPORTED
         );
         assert!(
             vmdk_error(p, vmdk::Error::Unsupported("a split sparse extent"))
@@ -551,11 +551,11 @@ mod tests {
         );
         assert_eq!(
             vmdk_error(p, vmdk::Error::NotVmdk).code,
-            crate::common::output::EXIT_FAILED
+            fs_core::cli::output::EXIT_FAILED
         );
         assert_eq!(
             vmdk_error(p, vmdk::Error::Corrupt("grain directory")).code,
-            crate::common::output::EXIT_FAILED
+            fs_core::cli::output::EXIT_FAILED
         );
     }
 }
