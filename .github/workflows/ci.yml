@@ -14,6 +14,13 @@ env:
   # library pin was held at v0.2.10, because that checkout had no wrapper in
   # it; #121 moved the pin and the two collapsed into one (#123).
 
+# Read-only unless a job asks for more. This repository's default token
+# is read-write, and a workflow that declares nothing inherits it, so every
+# job here would otherwise hold a write token beside actions it does not
+# pin.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test / ${{ matrix.os }}
