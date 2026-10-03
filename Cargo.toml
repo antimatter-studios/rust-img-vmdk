@@ -30,6 +30,17 @@ name = "rust-img-vmdk"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
+# WHAT THE RELEASE TARBALL SHIPS, read by rust-fs-core's package-cli.sh
+# (`scripts/core.sh package-cli`), which release.yml reaches through core's
+# release-cli workflow and ci.yml's `cli` job runs on every pull request.
+# The dotted name is a relative symlink to bin/rust-img-vmdk, with its man
+# page in the section given here; the binary's own `generate names` must
+# list exactly these, or the packaging fails. CAVEATS is the default,
+# packaging/CAVEATS.
+[package.metadata.package-cli]
+names = { "img.vmdk" = 1 }
+licenses = ["LICENSE"]
+
 [features]
 # The command-line tool and nothing else. The plumbing it shares with
 # the family -- dispatch, --version, doctor, the output contract, man pages
@@ -44,7 +55,7 @@ cli = ["dep:clap", "am-fs-core/cli"]
 qemu-validation = []
 
 [dependencies]
-am-fs-core = { path = "../rust-fs-core", version = "0.2.18" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2.23" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vmdk` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.
