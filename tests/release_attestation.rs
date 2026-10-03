@@ -346,3 +346,254 @@ fn the_reader_discriminates() {
         "does not attach the attested tarballs",
     );
 }
+
+/// The reusable workflow that packages, attests and attaches the
+/// command-line tarballs, up to its `@`. rust-fs-core holds the one copy
+/// (#150); this repository only calls it.
+const CORE_RELEASE_CLI: &str = "antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@";
+
+/// A file of this repository, read whole.
+fn read(rel: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+}
+
+/// A TOML file of this repository, parsed.
+fn read_toml(rel: &str) -> toml::Table {
+    read(rel)
+        .parse()
+        .unwrap_or_else(|e| panic!("{rel} parses as TOML: {e}"))
+}
+
+/// The rust-fs-core tag Cargo.toml's am-fs-core dependency pins, as
+/// `v<version>`: the release the path sibling is cloned at.
+fn pinned_core_ref() -> String {
+    let manifest = read_toml("Cargo.toml");
+    let version = manifest["dependencies"]["am-fs-core"]["version"]
+        .as_str()
+        .expect("Cargo.toml pins am-fs-core by version");
+    format!("v{}", version.trim_start_matches(['=', '^', '~']))
+}
+
+/// The toolchain rust-toolchain.toml pins.
+fn pinned_toolchain() -> String {
+    read_toml("rust-toolchain.toml")["toolchain"]["channel"]
+        .as_str()
+        .expect("rust-toolchain.toml pins a channel")
+        .to_owned()
+}
+
+/// Everything wrong with how `yaml` hands the tarballs to core's
+/// release-cli workflow; empty when nothing is.
+fn release_cli_gaps(yaml: &str, core_ref: &str, toolchain: &str) -> Vec<String> {
+    let doc = load(yaml);
+    let jobs = doc
+        .as_mapping_get("jobs")
+        .and_then(Yaml::as_mapping)
+        .expect("the workflow has jobs");
+    let mut gaps = Vec::new();
+    let callers: Vec<(&str, &Yaml)> = jobs
+        .iter()
+        .filter(|(_, job)| {
+            job.as_mapping_get("uses")
+                .and_then(Yaml::as_str)
+                .is_some_and(|u| u.starts_with(CORE_RELEASE_CLI))
+        })
+        .map(|(k, job)| (k.as_str().unwrap_or("?"), job))
+        .collect();
+    if callers.len() != 1 {
+        gaps.push(format!(
+            "{} jobs call {CORE_RELEASE_CLI}<sha>, not exactly one",
+            callers.len()
+        ));
+    }
+    for (name, job) in callers {
+        let uses = job
+            .as_mapping_get("uses")
+            .and_then(Yaml::as_str)
+            .unwrap_or("");
+        if !is_full_sha(&uses[CORE_RELEASE_CLI.len()..]) {
+            gaps.push(format!(
+                "job {name} uses {uses}, which a moved tag can redirect; pin a full commit SHA"
+            ));
+        }
+        let needs: Vec<String> = match job.as_mapping_get("needs") {
+            Some(n) if n.as_str().is_some() => vec![n.as_str().unwrap().to_owned()],
+            Some(n) => n
+                .as_sequence()
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|x| x.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        // Nothing ships before the gates pass, and not before `publish`
+        // has created the release the tarballs are attached to.
+        for need in ["test", "qemu-validation", "publish"] {
+            if !needs.iter().any(|n| n == need) {
+                gaps.push(format!("job {name} does not need job {need}"));
+            }
+        }
+        let granted = write_grants(job.as_mapping_get("permissions"));
+        for grant in GRANTS {
+            if !granted.iter().any(|g| g == grant) {
+                gaps.push(format!(
+                    "job {name} calls release-cli without {grant}: write"
+                ));
+            }
+        }
+        let with = |key: &str| {
+            job.as_mapping_get("with")
+                .and_then(|w| w.as_mapping_get(key))
+                .and_then(Yaml::as_str)
+                .unwrap_or("")
+                .to_owned()
+        };
+        if with("core-ref") != core_ref {
+            gaps.push(format!(
+                "job {name} passes core-ref {:?}, not Cargo.toml's am-fs-core pin {core_ref:?}",
+                with("core-ref")
+            ));
+        }
+        if with("toolchain") != toolchain {
+            gaps.push(format!(
+                "job {name} passes toolchain {:?}, not rust-toolchain.toml's {toolchain:?}",
+                with("toolchain")
+            ));
+        }
+    }
+    for (name, job) in jobs {
+        let packages_locally = job
+            .as_mapping_get("steps")
+            .and_then(Yaml::as_sequence)
+            .is_some_and(|st| {
+                st.iter().any(|s| {
+                    commands(s)
+                        .iter()
+                        .any(|c| c.contains("scripts/package-cli.sh"))
+                        || s.as_mapping_get("with")
+                            .and_then(|w| w.as_mapping_get("subject-path"))
+                            .and_then(Yaml::as_str)
+                            .is_some_and(|p| p.contains(".tar.gz"))
+                })
+            });
+        if packages_locally {
+            gaps.push(format!(
+                "job {} packages or attests the tarballs itself, beside core's release-cli",
+                name.as_str().unwrap_or("?")
+            ));
+        }
+    }
+    gaps
+}
+
+/// The tarballs are packaged, attested and attached by rust-fs-core's
+/// release-cli workflow, pinned by commit SHA, at the core tag and
+/// toolchain this repository pins, and no local copy of the packaging
+/// remains (#150).
+#[test]
+fn the_tool_tarballs_are_released_by_core_release_cli() {
+    let gaps = release_cli_gaps(&workflow(), &pinned_core_ref(), &pinned_toolchain());
+    assert!(gaps.is_empty(), "{WORKFLOW}: {gaps:#?}");
+    for copy in [
+        "scripts/package-cli.sh",
+        "tests/scripts/test-package-cli.sh",
+    ] {
+        assert!(
+            !Path::new(env!("CARGO_MANIFEST_DIR")).join(copy).exists(),
+            "{copy} is a local copy of rust-fs-core's packaging; run it as scripts/core.sh package-cli"
+        );
+    }
+    for rel in [".github/workflows/ci.yml", "chores.yml"] {
+        assert!(
+            !read(rel)
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .any(|l| l.contains("scripts/package-cli.sh")),
+            "{rel} runs a local scripts/package-cli.sh; run scripts/core.sh package-cli"
+        );
+    }
+    let manifest = read_toml("Cargo.toml");
+    assert!(
+        manifest
+            .get("package")
+            .and_then(|p| p.get("metadata"))
+            .and_then(|m| m.get("package-cli"))
+            .is_some(),
+        "Cargo.toml has no [package.metadata.package-cli], which core's package-cli reads"
+    );
+}
+
+#[test]
+fn the_release_cli_reader_discriminates() {
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let good = format!(
+        "permissions:\n  contents: read\n\
+         jobs:\n  test:\n    steps:\n      - run: cargo test\n\
+         \x20 qemu-validation:\n    steps:\n      - run: cargo test\n\
+         \x20 publish:\n    needs: [test, qemu-validation]\n    steps:\n      - run: cargo publish\n\
+         \x20 cli:\n    needs: [test, qemu-validation, publish]\n\
+         \x20   permissions:\n      contents: write\n      id-token: write\n      attestations: write\n\
+         \x20   uses: {CORE_RELEASE_CLI}{sha} # v0.2.23\n\
+         \x20   with:\n      core-ref: v0.2.23\n      toolchain: 1.95.0\n"
+    );
+    let gaps = |yaml: &str| release_cli_gaps(yaml, "v0.2.23", "1.95.0");
+    assert_eq!(gaps(&good), Vec::<String>::new(), "{good}");
+    let expect = |yaml: String, want: &str| {
+        let got = gaps(&yaml);
+        assert!(
+            got.iter().any(|g| g.contains(want)),
+            "expected a gap mentioning {want:?}, got {got:#?} for\n{yaml}"
+        );
+    };
+    expect(good.replace(sha, "v0.2.23"), "pin a full commit SHA");
+    expect(
+        good.replace(
+            "needs: [test, qemu-validation, publish]",
+            "needs: [test, qemu-validation]",
+        ),
+        "does not need job publish",
+    );
+    expect(
+        good.replace("needs: [test, qemu-validation, publish]", "needs: publish"),
+        "does not need job test",
+    );
+    expect(
+        good.replace(
+            "needs: [test, qemu-validation, publish]",
+            "needs: [test, publish]",
+        ),
+        "does not need job qemu-validation",
+    );
+    for grant in GRANTS {
+        expect(
+            good.replace(&format!("      {grant}: write\n"), ""),
+            &format!("without {grant}: write"),
+        );
+    }
+    expect(
+        good.replace("core-ref: v0.2.23", "core-ref: v0.2.18"),
+        "core-ref",
+    );
+    expect(
+        good.replace("toolchain: 1.95.0", "toolchain: stable"),
+        "toolchain",
+    );
+    expect(
+        good.replace(
+            CORE_RELEASE_CLI,
+            "someone/else/.github/workflows/release-cli.yml@",
+        ),
+        "not exactly one",
+    );
+    expect(
+        good.replacen(
+            "      - run: cargo test\n",
+            "      - run: scripts/package-cli.sh 1.0.0 x\n",
+            1,
+        ),
+        "packages or attests the tarballs itself",
+    );
+}
