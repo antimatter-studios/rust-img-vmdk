@@ -7,12 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # NO FS_CORE_ROOT. scripts/tier.sh resolves rust-fs-core's
-  # scripts/output-budget.sh (rust-fs-core#153), and its second candidate is
-  # `../rust-fs-core` -- the sibling checkout below, which is now at v0.2.14
-  # and carries the wrapper. This repository needed the variable while the
-  # library pin was held at v0.2.10, because that checkout had no wrapper in
-  # it; #121 moved the pin and the two collapsed into one (#123).
 
 # Read-only unless a job asks for more. This repository's default token
 # is read-write, and a workflow that declares nothing inherits it, so every
@@ -38,7 +32,7 @@ jobs:
           repository: antimatter-studios/rust-fs-core
           # ONE CHECKOUT, SERVING BOTH THINGS CORE IS HERE FOR: the library
           # Cargo.toml resolves rust-fs-core from, and the checkout whose
-          # scripts/output-budget.sh the tiers run.
+          # ../rust-fs-core/scripts/output-budget.sh the tiers run.
           #
           # They were two, at two refs. The library pin was held at v0.2.10
           # because from v0.2.11 a write past the end of a FileDevice is a
@@ -47,7 +41,7 @@ jobs:
           # that answers `--version` the way tier.sh requires. #121 made
           # allocation ask for the room with set_len, so the library pin moved
           # to the number the tooling already needed (#123).
-          ref: v0.3.1
+          ref: v0.3.2
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -70,7 +64,7 @@ jobs:
         # exits with the suite's own status -- the tail is opt-in
         # (OUTPUT_BUDGET_FAIL_TAIL), so the artefact below is how the whole
         # run is read. See the measured budget table at the top of
-        # chores.yml, and scripts/tier.sh.
+        # chores.yml, and ../rust-fs-core/scripts/tier.sh.
         #
         # EXPECT_OVERFLOW_CHECKS ARMS THE ONE CHECK A TEXT SCAN CANNOT DO.
         # This run has no `--release`, so overflow-checks are on, and it is
@@ -105,8 +99,8 @@ jobs:
         # and the default shell on windows-latest is PowerShell.
         shell: bash
         run: |
-          bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli
-          bash scripts/core.sh test-floor debug 225
+          bash ../rust-fs-core/scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli
+          bash ../rust-fs-core/scripts/test-floor.sh debug 225
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
       - name: keep the tier log
@@ -152,7 +146,7 @@ jobs:
           repository: antimatter-studios/rust-fs-core
           # One checkout, the library AND the output-budget wrapper. See the
           # `test` job above for why it used to be two.
-          ref: v0.3.1
+          ref: v0.3.2
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -173,12 +167,12 @@ jobs:
         # separately because nothing makes them stay equal.
         #
         # THE PIPE IS GONE, and with it the reason this step had to re-raise
-        # `PIPESTATUS[0]` by hand. scripts/tier.sh redirects rather than
+        # `PIPESTATUS[0]` by hand. ../rust-fs-core/scripts/tier.sh redirects rather than
         # pipes, so the status on the floor line is the suite's own.
         shell: bash
         run: |
-          bash scripts/tier.sh "test (release)" release 460 28000 -- cargo test --locked --release --all-targets --features cli
-          bash scripts/core.sh test-floor release 225
+          bash ../rust-fs-core/scripts/tier.sh "test (release)" release 460 28000 -- cargo test --locked --release --all-targets --features cli
+          bash ../rust-fs-core/scripts/test-floor.sh release 225
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4
@@ -201,7 +195,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.1
+          ref: v0.3.2
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -228,14 +222,14 @@ jobs:
         run: cargo doc --locked --no-deps
       - name: the one required check stands for every job
         working-directory: rust-img-vmdk
-        run: bash scripts/core.sh ci-gate
+        run: bash ../rust-fs-core/scripts/ci-gate.sh
       - name: the agent guide carries the shared block
         working-directory: rust-img-vmdk
         # AGENTS.md embeds agent-core, byte-identical with every sibling. This
         # runs the script directly rather than through `chore lint`, because
         # CI here does not install chore -- a guard wired only into a task
         # nothing runs is a guard that reports protection it is not providing.
-        run: scripts/agents-core-check.sh
+        run: bash ../rust-fs-core/scripts/agents-core-check.sh
       # The shell tests, by glob, so a guard added later needs no edit here.
       - name: script tests (tests/scripts/*.sh)
         working-directory: rust-img-vmdk
@@ -246,12 +240,12 @@ jobs:
             bash "$t"
           done
       # The family scripts are rust-fs-core's alone: this fails if a copy of
-      # one is committed here, scripts/core.sh differs from core's, or
+      # one is committed here, or
       # anything here still calls a local copy.
       - name: no copy of a rust-fs-core family script
         working-directory: rust-img-vmdk
         shell: bash
-        run: bash scripts/core.sh family-check
+        run: bash ../rust-fs-core/scripts/family-check.sh
 
   # Cross-validates our reader/writer against `qemu-img`. qemu-img is
   # invoked as a subprocess only — never linked, never bundled. The
@@ -268,7 +262,7 @@ jobs:
           repository: antimatter-studios/rust-fs-core
           # One checkout, the library AND the output-budget wrapper. See the
           # `test` job above for why it used to be two.
-          ref: v0.3.1
+          ref: v0.3.2
           path: rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -301,8 +295,8 @@ jobs:
         # with the step it lives in (#112).
         shell: bash
         run: |
-          bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation
-          bash scripts/core.sh test-floor qemu 23
+          bash ../rust-fs-core/scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation
+          bash ../rust-fs-core/scripts/test-floor.sh qemu 23
       # LINTED WHERE IT IS BUILT, AND ONLY HERE CAN IT BE.
       #
       # The `clippy` step in the `test` job runs `--all-targets`, which reads
@@ -354,7 +348,7 @@ jobs:
           repository: antimatter-studios/rust-fs-core
           # One checkout, the library AND the output-budget wrapper. See the
           # `test` job above for why it used to be two.
-          ref: v0.3.1
+          ref: v0.3.2
           path: rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -377,8 +371,8 @@ jobs:
         # about 95% of the count, and moves up with the suite.
         shell: bash
         run: |
-          bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh
-          bash scripts/core.sh test-floor cli 330
+          bash ../rust-fs-core/scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh
+          bash ../rust-fs-core/scripts/test-floor.sh cli 330
       # THE RELEASE TARBALL, PUT TOGETHER ON EVERY PULL REQUEST, so a release
       # is not the first time it is. rust-fs-core's package-cli (scripts/
       # core.sh package-cli) is what release.yml reaches through core's
@@ -396,7 +390,7 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           mkdir -p tmp/package
           cd tmp/package
-          bash ../../scripts/core.sh package-cli "$version" linux-x86_64 ../../target/release
+          bash ../../../rust-fs-core/scripts/package-cli.sh "$version" linux-x86_64 ../../target/release
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4
@@ -452,12 +446,12 @@ jobs:
     # `chore check:semver`, spelled out because CI here does not install chore: this tree's public API against the newest
     # version on crates.io, refusing a break the version in Cargo.toml does
     # not declare. Why, and what it cannot see, is at the top of
-    # scripts/semver-check.sh.
+    # ../rust-fs-core/scripts/semver-check.sh.
     name: semver (public API against crates.io)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # The version scripts/semver-check.sh expects. A prebuilt binary,
+      # The version ../rust-fs-core/scripts/semver-check.sh expects. A prebuilt binary,
       # checksum-verified by the action, rather than a ten-minute build.
       CARGO_SEMVER_CHECKS_VERSION: "0.50.0"
       # A failing tier prints only its verdict by default. Here the tail IS
@@ -470,7 +464,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.1
+          ref: v0.3.2
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -484,7 +478,7 @@ jobs:
       - name: semver (quiet, budgeted)
         working-directory: rust-img-vmdk
         shell: bash
-        run: bash scripts/tier.sh semver semver 40 4000 -- bash scripts/core.sh semver-check
+        run: bash ../rust-fs-core/scripts/tier.sh semver semver 40 4000 -- bash ../rust-fs-core/scripts/semver-check.sh
 
   ci-ok:
     name: ci-ok

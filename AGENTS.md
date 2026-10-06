@@ -227,50 +227,18 @@ Both trait methods are **defaulted** to a refusal, so a wrapping device that
 does not forward them turns a growable device into one that cannot allocate.
 `StallingDevice` and `CountingFlushes` in `tests/write.rs` forward both.
 
-## The output-budget wrapper is rust-fs-core's, and is resolved at run time
+## The output budget comes from rust-fs-core
 
-`scripts/output-budget.sh` is **not in this repository**. It used to be, as a
-vendored copy of fs-linux-test-harness's; it was deleted in favour of the
-canonical copy in `rust-fs-core` (rust-fs-core#153), because a committed copy
-is a copy that drifts and the family had several.
+Every tier runs through rust-fs-core's `scripts/tier.sh`, **run in place**
+from the `../rust-fs-core` checkout at the version this repository pins:
+`bash ../rust-fs-core/scripts/tier.sh LABEL LOG LINES BYTES -- COMMAND`.
+There is no copy of it, of `scripts/output-budget.sh`, or of any other family
+script in this repository, and rust-fs-core's `family-check` (run in CI)
+refuses one. Bumping the pinned core version is how the scripts are upgraded;
+nothing is recopied. See rust-fs-core#153 and #212.
 
-`scripts/tier.sh` resolves it on every run, in this order, and **a miss at any
-resolved location is fatal rather than a reason to try the next one**:
-
-1. `$FS_CORE_ROOT/scripts/output-budget.sh` — an explicit answer, absolute or
-   relative to this repository. Set-but-unusable is a configuration mistake,
-   so it refuses rather than looking elsewhere.
-2. `../rust-fs-core/scripts/output-budget.sh` — the sibling checkout. First
-   among the discovered sources so a coordinated local change to the wrapper
-   is exercised here, and because this suite runs on `windows-latest`, where a
-   `C:\...` path out of `cargo metadata` is not a path Git Bash can test or
-   copy.
-3. the `rust-fs-core` package root `cargo metadata` reports — the answer for a
-   checkout taking core from the registry.
-
-Whatever it finds must answer `--version` with exactly
-`rust-fs-core-output-budget 1`. **No SHA-256 is pinned**, deliberately:
-`rust-fs-ntfs` pins one, and a digest repeated across seven repositories has to
-be updated in seven repositories for any edit to the wrapper — the lockstep the
-migration removed. The version string moves when the behaviour moves.
-
-The wrapper is copied to `tmp/output-budget.$$.sh` for the run and removed by a
-trap, so nothing accumulates an untracked copy.
-
-**One pin of rust-fs-core now, where there were two.** `ci.yml` checked core
-out twice: `../rust-fs-core` at `v0.2.10`, what the crate LINKS, and
-`../rust-fs-core-budget` at `v0.2.13`, whose shell script the tiers RUN, named
-by `FS_CORE_ROOT`. A Rust API and a command-line contract really are separate
-concerns, and insisting they be one number would have forced a broken bump —
-but #121 moved the library pin to the number the tooling already needed, so
-there is one checkout, at `v0.2.14`, and **no `FS_CORE_ROOT`**: `tier.sh` finds
-the wrapper in the sibling, which is candidate 2 above (#123).
-
-`OUTPUT_BUDGET_VERBOSE=1` (or `chore test -- --verbose`) streams a run;
-`OUTPUT_BUDGET_FAIL_TAIL=40` asks a failing tier for a tail, which it no longer
-prints by default. Both were `FLTH_*` before the move, and **that rename fails
-silently** — the canonical script does not read the old names, so a run stays
-quiet instead of erroring.
+**`OUTPUT_BUDGET_VERBOSE`, not `FLTH_VERBOSE`.** The canonical script does
+not read the old name, and setting it does nothing at all.
 
 ## What gates a merge
 

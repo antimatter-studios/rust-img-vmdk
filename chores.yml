@@ -94,20 +94,12 @@ chore_min_version: 0.6.0
 #   9.5M of output, with command output the largest single contributor a
 #   repository controls.
 #
-#   WHERE THE SCRIPT COMES FROM, AND WHY IT IS NOT IN THIS REPOSITORY.
-#   scripts/output-budget.sh used to be a vendored copy of
-#   fs-linux-test-harness's. It is gone (rust-fs-core#153): the canonical
-#   wrapper belongs to rust-fs-core, and scripts/tier.sh resolves it AT RUN
-#   TIME -- $FS_CORE_ROOT, else ../rust-fs-core, else the rust-fs-core package
-#   `cargo metadata` resolves -- verifying `--version` and refusing loudly
-#   rather than falling back on anything local. A copy that lives here is a
-#   copy that drifts, and the family had several.
-#
-#   ONE PIN NOW, WHERE THERE WERE TWO. The wrapper ships from rust-fs-core
-#   v0.2.13, and rust-fs-core was pinned at v0.2.10 here -- so ci.yml checked
-#   core out twice, once for each purpose. #121 moved the library pin to
-#   v0.2.13, so one checkout serves both and `../rust-fs-core` is the candidate
-#   that answers. tests/output_budget.rs holds the RESOLVER to its refusals.
+#   WHERE THE SCRIPT COMES FROM. The wrapper the budgets are enforced by is
+#   rust-fs-core's scripts/output-budget.sh, run through its scripts/tier.sh
+#   IN PLACE from the ../rust-fs-core checkout at the pinned version, and
+#   THERE IS NO COPY OF EITHER HERE. A committed copy is a copy that drifts,
+#   which is the whole of antimatter-studios/rust-fs-core#153 and #212;
+#   rust-fs-core's family-check refuses one.
 vars:
   TRIPLE: aarch64-apple-darwin
   # `[package].name` is rust-img-vmdk; `[lib].name` is vmdk, so cargo writes
@@ -243,8 +235,8 @@ tasks:
     # Do not add `--release` here; tests/ci_profile.rs refuses a
     # workflow with no such run, and the reason is the same one (#77).
     cmds:
-      - 'EXPECT_OVERFLOW_CHECKS=1 bash scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli'
-      - 'bash scripts/core.sh test-floor debug 225'
+      - 'EXPECT_OVERFLOW_CHECKS=1 bash ../rust-fs-core/scripts/tier.sh "test (debug)" debug 400 27000 -- cargo test --locked --all-targets --features cli'
+      - 'bash ../rust-fs-core/scripts/test-floor.sh debug 225'
 
   test:release:
     desc: 'The suite in the profile that ships: no debug_assert!, arithmetic wraps'
@@ -253,8 +245,8 @@ tasks:
     # computation passes the debug run for the WRONG reason. See the note
     # on the `test-release` job in .github/workflows/ci.yml.
     cmds:
-      - 'bash scripts/tier.sh "test (release)" release 460 28000 -- cargo test --locked --release --all-targets --features cli'
-      - 'bash scripts/core.sh test-floor release 225'
+      - 'bash ../rust-fs-core/scripts/tier.sh "test (release)" release 460 28000 -- cargo test --locked --release --all-targets --features cli'
+      - 'bash ../rust-fs-core/scripts/test-floor.sh release 225'
 
   test:qemu:
     desc: 'The qemu-img cross-validation: another implementation reads what we wrote'
@@ -264,8 +256,8 @@ tasks:
     # `cargo test` with nothing to run and exiting 0. Hence the floor,
     # and hence the guard on the job itself.
     cmds:
-      - 'bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation'
-      - 'bash scripts/core.sh test-floor qemu 23'
+      - 'bash ../rust-fs-core/scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation'
+      - 'bash ../rust-fs-core/scripts/test-floor.sh qemu 23'
 
   cli:install:
     desc: 'Build the command-line tool (release, --features cli) and stage it as an install prefix: tmp/cli/bin/rust-img-vmdk, and img.vmdk a relative symlink to it'
@@ -291,8 +283,8 @@ tasks:
     # runner's longer paths in the doctor and PATH lines; the floor is about
     # 95% of the count. The `cli` job in ci.yml carries the same numbers.
     cmds:
-      - 'bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh'
-      - 'bash scripts/core.sh test-floor cli 330'
+      - 'bash ../rust-fs-core/scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/test-floor.sh cli 330'
 
   package:cli:
     desc: 'Build the tool and package it as this machine''s release tarball in tmp/package, checking its layout (what release.yml attaches)'
@@ -307,7 +299,7 @@ tasks:
         esac
         version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
         mkdir -p tmp/package && cd tmp/package
-        bash ../../scripts/core.sh package-cli "$version" "$label" ../../target/release
+        bash ../../../rust-fs-core/scripts/package-cli.sh "$version" "$label" ../../target/release
 
   clean:
     desc: Remove this crate's cargo output
@@ -341,7 +333,7 @@ tasks:
   lint:
     desc: Formatting and clippy, exactly as CI runs them
     cmds:
-      - scripts/agents-core-check.sh
+      - bash ../rust-fs-core/scripts/agents-core-check.sh
       - task: test:scripts
       - cargo fmt --check
       - cargo clippy --locked --all-targets --features cli -- -D warnings
@@ -373,7 +365,7 @@ tasks:
     # room for a warning block without hiding a flood. No floor: it is one
     # check, not a suite.
     cmds:
-      - 'bash scripts/tier.sh semver semver 40 4000 -- bash scripts/core.sh semver-check'
+      - 'bash ../rust-fs-core/scripts/tier.sh semver semver 40 4000 -- bash ../rust-fs-core/scripts/semver-check.sh'
 
   check:ci-gate:
     desc: The one required check stands for every job in ci.yml
@@ -386,4 +378,4 @@ tasks:
     # floor the gate itself enforces -- so the suite could satisfy its floor
     # partly by checking its own CI config.
     cmds:
-      - bash scripts/core.sh ci-gate
+      - bash ../rust-fs-core/scripts/ci-gate.sh

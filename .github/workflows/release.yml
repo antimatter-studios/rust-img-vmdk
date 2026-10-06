@@ -20,7 +20,7 @@ jobs:
 
       - name: clone rust-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.3.1 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,7 +52,7 @@ jobs:
 
       - name: clone rust-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.3.1 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -83,7 +83,7 @@ jobs:
           persist-credentials: false
       - name: clone rust-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.3.1 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.2 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
         with:
           toolchain: 1.95.0
@@ -100,7 +100,7 @@ jobs:
       # anything (rust-fs-core#209).
       - name: the CHANGELOG describes this version
         shell: bash
-        run: bash scripts/core.sh release-notes "$GITHUB_REF_NAME" >/dev/null
+        run: bash ../rust-fs-core/scripts/release-notes.sh "$GITHUB_REF_NAME" >/dev/null
 
       - name: package the crate
         shell: bash
@@ -174,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           # The release body is this version's CHANGELOG section (rust-fs-core#209).
-          bash scripts/core.sh release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+          bash ../rust-fs-core/scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
@@ -188,7 +188,7 @@ jobs:
   #
   # Packaged, attested and attached by rust-fs-core's release-cli workflow,
   # the family's one copy (#150): a native leg per platform builds
-  # rust-img-vmdk and runs `scripts/core.sh package-cli`, which stages the
+  # rust-img-vmdk and runs `../rust-fs-core/scripts/package-cli.sh`, which stages the
   # names Cargo.toml's [package.metadata.package-cli] declares -- bin/
   # rust-img-vmdk, bin/img.vmdk a relative symlink to it, the generated man
   # pages and completions, share/rust-img-vmdk/CAVEATS and LICENSE -- and
@@ -215,7 +215,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@2dbd7ddc63456f7e2d9ad4ba7e77ed10c3258844 # v0.3.1
+    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@c471c826edc78866f572b873cbc165cb61b86ccf # v0.3.2
     with:
-      core-ref: v0.3.1
+      core-ref: v0.3.2
       toolchain: 1.95.0
