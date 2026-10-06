@@ -60,7 +60,7 @@ cli = ["dep:clap", "rust-fs-core/cli"]
 qemu-validation = []
 
 [dependencies]
-rust-fs-core = { path = "../rust-fs-core", version = "0.3.0" }
+rust-fs-core = { path = "../rust-fs-core", version = "0.3.1" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vmdk` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.
