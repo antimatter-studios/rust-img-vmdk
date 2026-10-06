@@ -1,9 +1,9 @@
 [package]
 name = "am-img-vmdk"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "MIT"
-description = "Pure-Rust VMDK (VMware Virtual Machine Disk) read+write driver. Monolithic sparse variant, BlockDevice-backed. Exposes a Rust API and a C ABI."
+description = "Renamed to rust-img-vmdk: this crate receives no further versions. Depend on rust-img-vmdk instead; the import becomes use img_vmdk."
 repository = "https://github.com/antimatter-studios/rust-img-vmdk"
 
 # The fuzz crate is its own package, on its own toolchain, and is not

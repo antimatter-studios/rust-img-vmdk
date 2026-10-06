@@ -1,5 +1,19 @@
 # vmdk
 
+> **Renamed to [`rust-img-vmdk`](https://crates.io/crates/rust-img-vmdk).**
+> `am-img-vmdk` 0.4.1 is the last version published under this name. New versions
+> are published only as `rust-img-vmdk`, starting at 0.5.0. To move, change one line
+> in `Cargo.toml`:
+>
+> ```toml
+> # before
+> am-img-vmdk = "0.4"
+> # after
+> rust-img-vmdk = "0.5"
+> ```
+>
+> The import changes too: `use vmdk::...` becomes `use img_vmdk::...`.
+
 Pure-Rust reader for the VMware VMDK (Virtual Machine Disk) format.
 Implemented from VMware's published *Virtual Disk Format* technical
 note; no GPL code is copied or linked. Exposes a Rust API and a C ABI
