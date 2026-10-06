@@ -4,6 +4,8 @@ Notable changes to `am-img-vmdk`, newest first. This is a `0.x` crate, so the
 **minor** is the compatibility boundary: a minor bump may break API, a patch
 never does.
 
+## [Unreleased]
+
 ## [0.4.1] — 2026-10-06
 
 ### Renamed
@@ -496,7 +498,8 @@ never does.
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.3...v0.3.4
