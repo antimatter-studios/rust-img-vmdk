@@ -1,8 +1,17 @@
 # Changelog
 
-Notable changes to `am-img-vmdk`, newest first. This is a `0.x` crate, so the
+Notable changes to `rust-img-vmdk` (published as `am-img-vmdk` until its last version), newest first. This is a `0.x` crate, so the
 **minor** is the compatibility boundary: a minor bump may break API, a patch
 never does.
+
+## [0.5.0] — 2026-10-06
+
+### Changed
+
+- **Published as `rust-img-vmdk`, the repository's name.** The crate was `am-img-vmdk`
+  until its last version, which stays on crates.io pointing here. A
+  dependent changes one line in `Cargo.toml`; the import moves from `vmdk` to `img_vmdk`, and the C symbols are unchanged.
+- **Depends on `rust-fs-core` 0.3.0**, the same library under its new name.
 
 ## [Unreleased]
 
@@ -498,7 +507,8 @@ never does.
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.4...v0.3.5

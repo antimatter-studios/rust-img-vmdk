@@ -2,7 +2,7 @@
 //! binary.
 //!
 //! Installed as `rust-img-vmdk` and linked as `img.vmdk`. The dispatch and the
-//! output contract every tool shares are `fs_core::cli` (am-fs-core's `cli`
+//! output contract every tool shares are `fs_core::cli` (rust-fs-core's `cli`
 //! feature); `vmdk` is the tool itself.
 
 mod vmdk;

@@ -17,10 +17,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use fs_core::{BlockDevice, BlockRead, FileDevice};
-use vmdk::header::{
+use img_vmdk::header::{
     offsets, FLAG_REDUNDANT_GRAIN_TABLE, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC,
 };
-use vmdk::VmdkReader;
+use img_vmdk::VmdkReader;
 
 mod common;
 use common::{patch, TempPath, WriteAt};
@@ -346,7 +346,7 @@ fn on_device_round_trip_reads_match_path_open() {
 
     // Read-only on-device: writes must error.
     let err = r.write_at(0, &[1u8; 8]);
-    assert!(matches!(err, Err(vmdk::Error::ReadOnly)));
+    assert!(matches!(err, Err(img_vmdk::Error::ReadOnly)));
 }
 
 // ---------------------------------------------------------------------------
@@ -719,7 +719,7 @@ fn a_malformed_content_id_refuses_a_writable_open() {
         let before = std::fs::read(&path).unwrap();
 
         match VmdkReader::open_rw(&path) {
-            Err(vmdk::Error::Corrupt(msg)) => assert!(
+            Err(img_vmdk::Error::Corrupt(msg)) => assert!(
                 msg.contains("CID"),
                 "CID={cid:?}: the refusal must name the field, got {msg:?}"
             ),
@@ -757,7 +757,7 @@ fn a_short_content_id_with_no_room_to_widen_refuses_a_writable_open() {
     let before = std::fs::read(&path).unwrap();
 
     assert!(
-        matches!(VmdkReader::open_rw(&path), Err(vmdk::Error::Corrupt(_))),
+        matches!(VmdkReader::open_rw(&path), Err(img_vmdk::Error::Corrupt(_))),
         "a short CID with no room to widen must refuse the writable open"
     );
     assert_eq!(before, std::fs::read(&path).unwrap(), "the file changed");
@@ -1137,7 +1137,7 @@ fn open_readonly_rejects_writes() {
 
     let r = VmdkReader::open(&path).unwrap();
     let err = r.write_at(0, &[1u8; 4]);
-    assert!(matches!(err, Err(vmdk::Error::ReadOnly)));
+    assert!(matches!(err, Err(img_vmdk::Error::ReadOnly)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,7 +1152,7 @@ fn open_rw_on_device_refuses_readonly_inner() {
 
     let dev = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn BlockDevice>;
     let err = VmdkReader::open_rw_on_device(dev);
-    assert!(matches!(err, Err(vmdk::Error::ReadOnly)));
+    assert!(matches!(err, Err(img_vmdk::Error::ReadOnly)));
 }
 
 /// The same refusal, observed from where the header's promise is made:
@@ -1170,7 +1170,7 @@ fn the_c_rw_open_on_a_readonly_device_names_the_device() {
     let dev = Arc::new(FileDevice::open(&path).unwrap()) as Arc<dyn BlockDevice>;
     let inner = fs_core::ffi::FsCoreDevice::into_handle(dev);
     // Ownership passes to the call, success or failure.
-    let out = unsafe { vmdk::capi::vmdk_open_rw_on_device(inner) };
+    let out = unsafe { img_vmdk::capi::vmdk_open_rw_on_device(inner) };
     assert!(out.is_null(), "a read-only input device must be refused");
 
     let msg = unsafe { std::ffi::CStr::from_ptr(fs_core::ffi::fs_core_last_error_message()) }

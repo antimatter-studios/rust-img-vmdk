@@ -1,9 +1,9 @@
 /*
- * am-img-vmdk C ABI — opens a VMDK (VMware Virtual Machine Disk) and
+ * rust-img-vmdk C ABI — opens a VMDK (VMware Virtual Machine Disk) and
  * returns a generic FsCoreDevice handle. Once opened, all further
  * interaction goes through fs_core.h's device API.
  *
- * Link with libvmdk.a and include this header alongside fs_core.h.
+ * Link with libimg_vmdk.a and include this header alongside fs_core.h.
  *
  * `chore staticlib` builds that library and copies both headers beside
  * it; `chore artifact` prints the absolute path of the directory

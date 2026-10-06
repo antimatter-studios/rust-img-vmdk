@@ -19,7 +19,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{value_parser, Arg, ArgMatches, Command as Cmd};
-use vmdk::VmdkReader;
+use img_vmdk::VmdkReader;
 
 use fs_core::cli::{CliError, Json, Outcome, Tool};
 
@@ -213,9 +213,9 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
 /// The library's refusal of something the image is — a flat, split or
 /// VMFS layout, a child image with a parent — is a verb this tool cannot
 /// do (exit 3); anything else failed.
-fn vmdk_error(image: &Path, e: vmdk::Error) -> CliError {
+fn vmdk_error(image: &Path, e: img_vmdk::Error) -> CliError {
     match e {
-        vmdk::Error::Unsupported(_) => {
+        img_vmdk::Error::Unsupported(_) => {
             CliError::not_implemented(format!("{}: {e}", image.display()))
         }
         other => CliError::failed(format!("{}: {other}", image.display())),
@@ -430,9 +430,9 @@ fn is_same_file(_input: &std::fs::File, _image: &Path) -> bool {
 /// A write the library refuses by what the image is (a streamOptimized
 /// image, whose grains are compressed and append-only) is a verb it cannot
 /// do; anything else failed.
-fn write_error(image: &Path, e: vmdk::Error) -> CliError {
+fn write_error(image: &Path, e: img_vmdk::Error) -> CliError {
     match e {
-        vmdk::Error::Unsupported(why) => {
+        img_vmdk::Error::Unsupported(why) => {
             CliError::not_implemented(format!("write: {}: {why}", image.display()))
         }
         other => vmdk_error(image, other),
@@ -541,20 +541,20 @@ mod tests {
     fn what_the_library_refuses_is_not_implemented_and_the_rest_failed() {
         let p = Path::new("x.vmdk");
         assert_eq!(
-            vmdk_error(p, vmdk::Error::Unsupported("a split sparse extent")).code,
+            vmdk_error(p, img_vmdk::Error::Unsupported("a split sparse extent")).code,
             fs_core::cli::output::EXIT_UNSUPPORTED
         );
         assert!(
-            vmdk_error(p, vmdk::Error::Unsupported("a split sparse extent"))
+            vmdk_error(p, img_vmdk::Error::Unsupported("a split sparse extent"))
                 .message
                 .starts_with("not implemented: x.vmdk: ")
         );
         assert_eq!(
-            vmdk_error(p, vmdk::Error::NotVmdk).code,
+            vmdk_error(p, img_vmdk::Error::NotVmdk).code,
             fs_core::cli::output::EXIT_FAILED
         );
         assert_eq!(
-            vmdk_error(p, vmdk::Error::Corrupt("grain directory")).code,
+            vmdk_error(p, img_vmdk::Error::Corrupt("grain directory")).code,
             fs_core::cli::output::EXIT_FAILED
         );
     }
