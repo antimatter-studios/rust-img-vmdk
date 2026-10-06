@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use vmdk::VmdkReader;
+use img_vmdk::VmdkReader;
 
 mod common;
 use common::TempPath;
@@ -266,7 +266,7 @@ fn a_flat_or_split_descriptor_names_its_create_type_rather_than_denying_it_is_a_
         assert_eq!(qemu_virtual_size(&path), 8 * 1024 * 1024);
 
         match VmdkReader::open(&path) {
-            Err(vmdk::Error::Unsupported(msg)) => assert!(
+            Err(img_vmdk::Error::Unsupported(msg)) => assert!(
                 msg.contains(subformat),
                 "the refusal must name the create type; for {subformat} it said {msg:?}"
             ),
@@ -402,7 +402,9 @@ fn our_reader_matches_a_qemu_stream_optimized_image() {
     }
 
     match VmdkReader::open_rw(&stream) {
-        Err(vmdk::Error::Unsupported(msg)) => assert!(msg.contains("stream-optimized"), "{msg}"),
+        Err(img_vmdk::Error::Unsupported(msg)) => {
+            assert!(msg.contains("stream-optimized"), "{msg}")
+        }
         Err(other) => panic!("refused for the wrong reason: {other}"),
         Ok(_) => panic!("a stream-optimized image opened for writing"),
     }
@@ -487,7 +489,7 @@ fn a_grain_entry_naming_the_wrong_record_is_refused() {
     let r = VmdkReader::open(&path).unwrap();
     let mut buf = vec![0u8; 512];
     match r.read_at(0, &mut buf) {
-        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("different grain"), "{msg}"),
+        Err(img_vmdk::Error::Corrupt(msg)) => assert!(msg.contains("different grain"), "{msg}"),
         other => panic!("grain 0 served grain 2's record: {other:?}"),
     }
 }
@@ -535,7 +537,7 @@ fn a_record_named_by_two_entries_is_refused_for_the_second_after_the_first_is_re
     r.read_at(0, &mut buf).unwrap();
     assert!(buf == data[..512], "grain 0 reads its own record");
     match r.read_at(2 * 65536, &mut buf) {
-        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("different grain"), "{msg}"),
+        Err(img_vmdk::Error::Corrupt(msg)) => assert!(msg.contains("different grain"), "{msg}"),
         other => panic!("grain 2 was served grain 0's cached bytes: {other:?}"),
     }
 }
@@ -562,7 +564,7 @@ fn a_compressed_record_longer_than_any_grain_stream_is_refused() {
     std::fs::write(&path, &bytes).unwrap();
     let r = VmdkReader::open(&path).unwrap();
     match r.read_at(0, &mut buf) {
-        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("longer than"), "{msg}"),
+        Err(img_vmdk::Error::Corrupt(msg)) => assert!(msg.contains("longer than"), "{msg}"),
         other => panic!("a {too_long}-byte record for a 64 KiB grain was read: {other:?}"),
     }
 }
@@ -577,7 +579,7 @@ fn a_stream_optimized_grain_past_one_gib_is_refused_at_open() {
     let path = dir.join("grain.vmdk");
     bytes[20..28].copy_from_slice(&0x20_0000u64.to_le_bytes());
     std::fs::write(&path, &bytes).unwrap();
-    if let Err(vmdk::Error::Corrupt(msg)) = VmdkReader::open(&path) {
+    if let Err(img_vmdk::Error::Corrupt(msg)) = VmdkReader::open(&path) {
         assert!(
             !msg.contains("1 GiB"),
             "a 1 GiB grain is qemu's limit, not past it"
@@ -587,7 +589,7 @@ fn a_stream_optimized_grain_past_one_gib_is_refused_at_open() {
         bytes[20..28].copy_from_slice(&sectors.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         match VmdkReader::open(&path) {
-            Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("1 GiB"), "{msg}"),
+            Err(img_vmdk::Error::Corrupt(msg)) => assert!(msg.contains("1 GiB"), "{msg}"),
             Err(other) => panic!("{sectors} sectors: refused for the wrong reason: {other}"),
             Ok(_) => panic!("a {sectors}-sector stream-optimized grain opened"),
         }
@@ -614,7 +616,7 @@ fn a_stream_optimized_header_under_a_monolithic_sparse_descriptor_is_refused() {
     let path = dir.join("mislabelled.vmdk");
     std::fs::write(&path, &bytes).unwrap();
     match VmdkReader::open(&path) {
-        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("createType"), "{msg}"),
+        Err(img_vmdk::Error::Corrupt(msg)) => assert!(msg.contains("createType"), "{msg}"),
         Err(other) => panic!("refused for the wrong reason: {other}"),
         Ok(_) => panic!("a mislabelled stream-optimized image opened"),
     }
@@ -647,7 +649,7 @@ fn a_split_sparse_extent_is_unsupported_rather_than_corrupt() {
     );
 
     match VmdkReader::open(&extent) {
-        Err(vmdk::Error::Unsupported(msg)) => assert!(
+        Err(img_vmdk::Error::Unsupported(msg)) => assert!(
             msg.contains("extent"),
             "the refusal must say this is one extent of a split image, got {msg:?}"
         ),
@@ -665,7 +667,7 @@ fn a_file_that_is_neither_a_sparse_extent_nor_a_descriptor_is_still_not_a_vmdk()
     let path = dir.join("plain.bin");
     std::fs::write(&path, vec![0x5Au8; 4096]).unwrap();
     match VmdkReader::open(&path) {
-        Err(vmdk::Error::NotVmdk) => {}
+        Err(img_vmdk::Error::NotVmdk) => {}
         Err(other) => panic!("expected NotVmdk, got {other}"),
         Ok(_) => panic!("expected NotVmdk, got Ok"),
     }

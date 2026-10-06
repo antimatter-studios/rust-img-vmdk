@@ -1,19 +1,5 @@
 # vmdk
 
-> **Renamed to [`rust-img-vmdk`](https://crates.io/crates/rust-img-vmdk).**
-> `am-img-vmdk` 0.4.1 is the last version published under this name. New versions
-> are published only as `rust-img-vmdk`, starting at 0.5.0. To move, change one line
-> in `Cargo.toml`:
->
-> ```toml
-> # before
-> am-img-vmdk = "0.4"
-> # after
-> rust-img-vmdk = "0.5"
-> ```
->
-> The import changes too: `use vmdk::...` becomes `use img_vmdk::...`.
-
 Pure-Rust reader for the VMware VMDK (Virtual Machine Disk) format.
 Implemented from VMware's published *Virtual Disk Format* technical
 note; no GPL code is copied or linked. Exposes a Rust API and a C ABI
@@ -23,7 +9,7 @@ suitable for FFI from C/C++/Go/Swift.
 
 - [x] `monolithicSparse` (single file: header + embedded descriptor +
       grain directory + grain tables + grain data)
-- [x] `BlockRead` + `BlockDevice` impl via `am-fs-core` — generic over
+- [x] `BlockRead` + `BlockDevice` impl via `rust-fs-core` — generic over
       any device, not just files
 - [x] C ABI: `vmdk_open` / `vmdk_open_rw` (path) and
       `vmdk_open_on_device` / `vmdk_open_rw_on_device` (existing
@@ -71,7 +57,7 @@ src/
 tests/
   synthetic.rs   hand-built fixtures
 include/
-  vmdk.h         C ABI header
+  img_vmdk.h         C ABI header
 ```
 
 ## Command line
@@ -133,8 +119,8 @@ repository, not uploaded from someone's machine. To check the crates.io
 download of version `X.Y.Z`:
 
 ```sh
-curl -sSfLo am-img-vmdk-X.Y.Z.crate https://static.crates.io/crates/am-img-vmdk/am-img-vmdk-X.Y.Z.crate
-gh attestation verify am-img-vmdk-X.Y.Z.crate \
+curl -sSfLo rust-img-vmdk-X.Y.Z.crate https://static.crates.io/crates/rust-img-vmdk/rust-img-vmdk-X.Y.Z.crate
+gh attestation verify rust-img-vmdk-X.Y.Z.crate \
   --repo antimatter-studios/rust-img-vmdk \
   --signer-workflow antimatter-studios/rust-img-vmdk/.github/workflows/release.yml
 ```
@@ -144,13 +130,13 @@ checksum crates.io records for that version, so the file on the release
 page and the crates.io download are the same bytes.
 
 The command-line tool is attached to the same release as a tarball per
-platform, `am-img-vmdk-X.Y.Z-darwin-arm64.tar.gz` and
-`am-img-vmdk-X.Y.Z-linux-x86_64.tar.gz`. They are packaged and attested by
+platform, `rust-img-vmdk-X.Y.Z-darwin-arm64.tar.gz` and
+`rust-img-vmdk-X.Y.Z-linux-x86_64.tar.gz`. They are packaged and attested by
 rust-fs-core's shared `release-cli.yml` workflow, which this repository's
 `release.yml` calls, so that is the workflow their attestations name:
 
 ```sh
-gh attestation verify am-img-vmdk-X.Y.Z-darwin-arm64.tar.gz \
+gh attestation verify rust-img-vmdk-X.Y.Z-darwin-arm64.tar.gz \
   --repo antimatter-studios/rust-img-vmdk \
   --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
 ```

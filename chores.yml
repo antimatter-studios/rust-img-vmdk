@@ -16,13 +16,13 @@ chore_min_version: 0.6.0
 #
 # `artifact` PRINTS A DIRECTORY, NOT A FILE. That is the one place this
 # differs from rust-blk-probe, whose single binary lets its `artifact` name
-# a file: this crate produces libvmdk.a AND the headers beside it, so
+# a file: this crate produces libimg_vmdk.a AND the headers beside it, so
 # there is no single path to name.
 #
 # WHY fs_core.h IS COPIED TOO. include/vmdk.h opens with
 # `#include "fs_core.h"` — this crate's C ABI hands out FsCoreDevice handles —
-# so a consumer given only vmdk.h cannot compile. The path below is the same
-# one Cargo.toml resolves am-fs-core from, and NOTHING CHECKS THAT THE TWO
+# so a consumer given only img_vmdk.h cannot compile. The path below is the same
+# one Cargo.toml resolves rust-fs-core from, and NOTHING CHECKS THAT THE TWO
 # AGREE.
 # QUIET BY DEFAULT, --verbose ON REQUEST, AND THE BUDGET IS A NUMBER.
 #
@@ -98,21 +98,21 @@ chore_min_version: 0.6.0
 #   scripts/output-budget.sh used to be a vendored copy of
 #   fs-linux-test-harness's. It is gone (rust-fs-core#153): the canonical
 #   wrapper belongs to rust-fs-core, and scripts/tier.sh resolves it AT RUN
-#   TIME -- $FS_CORE_ROOT, else ../rust-fs-core, else the am-fs-core package
+#   TIME -- $FS_CORE_ROOT, else ../rust-fs-core, else the rust-fs-core package
 #   `cargo metadata` resolves -- verifying `--version` and refusing loudly
 #   rather than falling back on anything local. A copy that lives here is a
 #   copy that drifts, and the family had several.
 #
 #   ONE PIN NOW, WHERE THERE WERE TWO. The wrapper ships from rust-fs-core
-#   v0.2.13, and am-fs-core was pinned at v0.2.10 here -- so ci.yml checked
+#   v0.2.13, and rust-fs-core was pinned at v0.2.10 here -- so ci.yml checked
 #   core out twice, once for each purpose. #121 moved the library pin to
 #   v0.2.13, so one checkout serves both and `../rust-fs-core` is the candidate
 #   that answers. tests/output_budget.rs holds the RESOLVER to its refusals.
 vars:
   TRIPLE: aarch64-apple-darwin
-  # `[package].name` is am-img-vmdk; `[lib].name` is vmdk, so cargo writes
-  # libvmdk.a. The header mirrors the lib name, not the package name.
-  LIBNAME: vmdk
+  # `[package].name` is rust-img-vmdk; `[lib].name` is vmdk, so cargo writes
+  # libimg_vmdk.a. The header mirrors the lib name, not the package name.
+  LIBNAME: img_vmdk
 
 tasks:
   staticlib:
@@ -187,7 +187,7 @@ tasks:
       #
       # include/vmdk.h said `libam_img_vmdk.a` for as long as the file
       # existed, and cargo has never produced that name -- `[lib] name`
-      # is vmdk, so the artefact is libvmdk.a, which is exactly what the
+      # is vmdk, so the artefact is libimg_vmdk.a, which is exactly what the
       # `cp` below copies. A C consumer following the header got a
       # linker error for a library nobody builds.
       #
@@ -329,7 +329,7 @@ tasks:
     #
     # IT PRINTS A DIRECTORY, NOT A FILE, and that is the one place this differs
     # from rust-blk-probe's `artifact`. That crate produces a single binary, so
-    # it can name a file. This one produces libvmdk.a AND the headers beside it,
+    # it can name a file. This one produces libimg_vmdk.a AND the headers beside it,
     # so there is no single path to name — A CONSUMER COPIES THE CONTENTS of
     # what this prints. A consumer that treats it as a file path will silently
     # copy the wrong thing.

@@ -1,4 +1,4 @@
-# Human-Code Report — am-img-vmdk
+# Human-Code Report — rust-img-vmdk
 
 **Date:** 2026-08-28
 **Scope:** full crate (`src/*.rs`, `tests/*.rs`, `include/vmdk.h`, `chores.yml`)
@@ -108,7 +108,7 @@ known type plus `Unknown`, a `FromStr`/`from_descriptor_value` constructor, a
 holds `CreateType` instead of `String`. The `Error::Unsupported` message then comes from
 `as_descriptor_str()`, the identity match evaporates, and adding `monolithicFlat` support
 later becomes "add an arm to `is_supported`" with the compiler pointing at every other
-site that needs to change. This also gives `lib.rs` / `capi.rs` / `vmdk.h` / `README.md`
+site that needs to change. This also gives `lib.rs` / `capi.rs` / `img_vmdk.h` / `README.md`
 one authoritative list to point at instead of four transcriptions.
 
 **Do not change** the `Error::Unsupported(&'static str)` signature — it is part of the
@@ -684,7 +684,7 @@ confidently a refactor can proceed:
   understanding of the layout, so a shared misreading would be invisible.
 - **`chores.yml:31-33` flags its own hazard** and it is still live: `include/vmdk.h`
   `#include`s `fs_core.h`, which the chore copies from `../rust-fs-core/include/`, and
-  nothing checks that path agrees with the one `Cargo.toml` resolves `am-fs-core` from.
+  nothing checks that path agrees with the one `Cargo.toml` resolves `rust-fs-core` from.
   The file says so in capitals. Out of scope for this pass, but it is a real
   build-correctness trap.
 - **`tests/write.rs:406-409`** contains a comment with a visible arithmetic false start

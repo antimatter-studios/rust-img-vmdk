@@ -15,10 +15,10 @@
 //!   sectors 7..134 grain 0 data (64 KiB)
 //! ```
 
+use img_vmdk::header::{HEADER_SIZE, MAGIC};
+use img_vmdk::{Error, VmdkReader};
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use vmdk::header::{HEADER_SIZE, MAGIC};
-use vmdk::{Error, VmdkReader};
 
 mod common;
 use common::{patch, TempPath};
@@ -39,9 +39,9 @@ const FILE_LEN: u64 = (GRAIN0_OFF_SECTOR + GRAIN_SIZE) * SECTOR;
 // "the descriptor offset" should corrupt whatever the parser reads as
 // the descriptor offset — if the two ever disagree, the test passes
 // while corrupting a neighbouring field.
-const OFF_DESC_OFFSET: u64 = vmdk::header::offsets::DESCRIPTOR_OFFSET as u64;
-const OFF_DESC_SIZE: u64 = vmdk::header::offsets::DESCRIPTOR_SIZE as u64;
-const OFF_GD_OFFSET: u64 = vmdk::header::offsets::GD_OFFSET as u64;
+const OFF_DESC_OFFSET: u64 = img_vmdk::header::offsets::DESCRIPTOR_OFFSET as u64;
+const OFF_DESC_SIZE: u64 = img_vmdk::header::offsets::DESCRIPTOR_SIZE as u64;
+const OFF_GD_OFFSET: u64 = img_vmdk::header::offsets::GD_OFFSET as u64;
 
 /// Self-deleting, so a panicking assertion leaves nothing behind.
 fn tmp_path(name: &str) -> TempPath {
@@ -224,9 +224,9 @@ fn delta_disk_declaring_a_parent_is_refused_at_open() {
     }
 }
 
-const OFF_GRAIN_SIZE: u64 = vmdk::header::offsets::GRAIN_SIZE as u64;
-const OFF_NUM_GTES_PER_GT: u64 = vmdk::header::offsets::NUM_GTES_PER_GT as u64;
-const OFF_VERSION: u64 = vmdk::header::offsets::VERSION as u64;
+const OFF_GRAIN_SIZE: u64 = img_vmdk::header::offsets::GRAIN_SIZE as u64;
+const OFF_NUM_GTES_PER_GT: u64 = img_vmdk::header::offsets::NUM_GTES_PER_GT as u64;
+const OFF_VERSION: u64 = img_vmdk::header::offsets::VERSION as u64;
 
 /// `grain_size` is a sector count, and the reader turns it into bytes
 /// by multiplying by 512. The only thing checked was that it was not
@@ -389,10 +389,11 @@ fn an_esxi_vmfs_sparse_extent_is_refused_as_vmfs_sparse_not_as_not_a_vmdk() {
         Ok(_) => panic!("read a vmfsSparse extent as if it were monolithicSparse"),
     };
 
-    let from_descriptor = match vmdk::descriptor::Descriptor::parse("createType=\"vmfsSparse\"\n") {
-        Err(Error::Unsupported(msg)) => msg,
-        other => panic!("expected Unsupported from the descriptor, got {other:?}"),
-    };
+    let from_descriptor =
+        match img_vmdk::descriptor::Descriptor::parse("createType=\"vmfsSparse\"\n") {
+            Err(Error::Unsupported(msg)) => msg,
+            other => panic!("expected Unsupported from the descriptor, got {other:?}"),
+        };
     assert_eq!(
         from_header, from_descriptor,
         "the same layout must be refused with the same message whichever file names it"
@@ -676,7 +677,7 @@ fn interesting(rng: &mut XorShift, width: usize) -> Vec<u8> {
 
 /// Every header field, by the parser's own offsets, with its width.
 const HEADER_FIELDS: [(usize, usize); 13] = {
-    use vmdk::header::offsets::*;
+    use img_vmdk::header::offsets::*;
     [
         (MAGIC, 4),
         (VERSION, 4),

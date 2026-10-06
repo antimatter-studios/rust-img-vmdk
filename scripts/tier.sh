@@ -75,7 +75,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #      ON windows-latest: under Git Bash a `C:\...` path out of `cargo
 #      metadata` is not a path that can be tested or copied, while the
 #      sibling path is POSIX on every runner.
-#   3. whatever `cargo metadata` says the am-fs-core package root is -- the
+#   3. whatever `cargo metadata` says the rust-fs-core package root is -- the
 #      answer for a standalone checkout that takes core from the registry
 #      rather than from a sibling.
 #
@@ -150,12 +150,12 @@ try:
 except Exception:
     sys.exit(0)
 print(next((p["manifest_path"].rsplit("/", 1)[0]
-            for p in packages if p["name"] == "am-fs-core"), ""))
+            for p in packages if p["name"] == "rust-fs-core"), ""))
 ')"
     [ -n "$core_package_root" ] && [ -f "$core_package_root/$CORE_SCRIPT_REL" ] || die \
         "no rust-fs-core supplied $CORE_SCRIPT_REL." \
         "Looked at: \$FS_CORE_ROOT (unset), $CORE_SIBLING/$CORE_SCRIPT_REL," \
-        "and the am-fs-core package \`cargo metadata\` resolves." \
+        "and the rust-fs-core package \`cargo metadata\` resolves." \
         "The wrapper is rust-fs-core's and is NOT vendored here. It ships" \
         "from $CORE_MIN_VERSION onwards and must answer \`--version\` with" \
         "\"$CORE_API\"." \

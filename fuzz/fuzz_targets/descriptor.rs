@@ -13,5 +13,5 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
-    let _ = vmdk::descriptor::Descriptor::parse(text);
+    let _ = img_vmdk::descriptor::Descriptor::parse(text);
 });

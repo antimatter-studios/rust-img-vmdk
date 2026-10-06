@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use common::{TempPath, WriteAt};
-use vmdk::header::{HEADER_SIZE, MAGIC};
+use img_vmdk::header::{HEADER_SIZE, MAGIC};
 
 const TOOL: &str = env!("CARGO_BIN_EXE_rust-img-vmdk");
 
@@ -117,7 +117,7 @@ fn write_refuses_an_input_past_the_virtual_disk_by_its_length() {
         "{}",
         String::from_utf8_lossy(&wrote.stderr)
     );
-    let r = vmdk::VmdkReader::open(&image).unwrap();
+    let r = img_vmdk::VmdkReader::open(&image).unwrap();
     let mut back = [0u8; 6];
     r.read_at(511, &mut back).unwrap();
     assert_eq!(&back, b"\x33fits\x33");

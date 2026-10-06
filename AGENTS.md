@@ -153,7 +153,7 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
 <!-- END SHARED BLOCK: agent-core v2 -->
 ## What this is
 
-Pure-Rust VMDK reader and writer over `am-fs-core`, including stream-optimized
+Pure-Rust VMDK reader and writer over `rust-fs-core`, including stream-optimized
 images, linked into the app as a staticlib.
 
 ## Running tests
@@ -195,7 +195,7 @@ the grain table, at the file's tail and then record where it went. That used to
 work because a write past the end of a `FileDevice` grew the file underneath
 it — and rust-fs-core#75 made it a refusal, correctly: `size_bytes()` reported
 the construction-time length while the file grew, so `CachingDevice` could
-serve bytes no cached read could reach (rust-fs-core#70). The `am-fs-core` pin
+serve bytes no cached read could reach (rust-fs-core#70). The `rust-fs-core` pin
 sat at `v0.2.10` for six releases because of it, with 12 failing write tests
 waiting behind the bump — the largest count of the four image crates.
 
@@ -245,7 +245,7 @@ resolved location is fatal rather than a reason to try the next one**:
    is exercised here, and because this suite runs on `windows-latest`, where a
    `C:\...` path out of `cargo metadata` is not a path Git Bash can test or
    copy.
-3. the `am-fs-core` package root `cargo metadata` reports — the answer for a
+3. the `rust-fs-core` package root `cargo metadata` reports — the answer for a
    checkout taking core from the registry.
 
 Whatever it finds must answer `--version` with exactly

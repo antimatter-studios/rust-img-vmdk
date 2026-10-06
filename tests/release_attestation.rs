@@ -335,13 +335,13 @@ fn read_toml(rel: &str) -> toml::Table {
         .unwrap_or_else(|e| panic!("{rel} parses as TOML: {e}"))
 }
 
-/// The rust-fs-core tag Cargo.toml's am-fs-core dependency pins, as
+/// The rust-fs-core tag Cargo.toml's rust-fs-core dependency pins, as
 /// `v<version>`: the release the path sibling is cloned at.
 fn pinned_core_ref() -> String {
     let manifest = read_toml("Cargo.toml");
-    let version = manifest["dependencies"]["am-fs-core"]["version"]
+    let version = manifest["dependencies"]["rust-fs-core"]["version"]
         .as_str()
-        .expect("Cargo.toml pins am-fs-core by version");
+        .expect("Cargo.toml pins rust-fs-core by version");
     format!("v{}", version.trim_start_matches(['=', '^', '~']))
 }
 
@@ -423,7 +423,7 @@ fn release_cli_gaps(yaml: &str, core_ref: &str, toolchain: &str) -> Vec<String> 
         };
         if with("core-ref") != core_ref {
             gaps.push(format!(
-                "job {name} passes core-ref {:?}, not Cargo.toml's am-fs-core pin {core_ref:?}",
+                "job {name} passes core-ref {:?}, not Cargo.toml's rust-fs-core pin {core_ref:?}",
                 with("core-ref")
             ));
         }

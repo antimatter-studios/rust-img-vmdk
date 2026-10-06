@@ -1,9 +1,9 @@
 [package]
-name = "am-img-vmdk"
-version = "0.4.1"
+name = "rust-img-vmdk"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
-description = "Renamed to rust-img-vmdk: this crate receives no further versions. Depend on rust-img-vmdk instead; the import becomes use img_vmdk."
+description = "Pure-Rust VMDK (VMware Virtual Machine Disk) read+write driver. Monolithic sparse variant, BlockDevice-backed. Exposes a Rust API and a C ABI."
 repository = "https://github.com/antimatter-studios/rust-img-vmdk"
 
 # The fuzz crate is its own package, on its own toolchain, and is not
@@ -11,8 +11,13 @@ repository = "https://github.com/antimatter-studios/rust-img-vmdk"
 # try to include it and fail on the nightly-only dependency.
 exclude = ["fuzz"]
 
+# The name this crate had on crates.io: the semver check's baseline until
+# a release exists under the new one (rust-fs-core's semver-check.sh).
+[package.metadata.semver]
+former-name = "rust-img-vmdk"
+
 [lib]
-name = "vmdk"
+name = "img_vmdk"
 crate-type = ["staticlib", "rlib"]
 
 # THE COMMAND-LINE TOOL: one multi-call binary, named for the repository.
@@ -44,9 +49,9 @@ licenses = ["LICENSE"]
 [features]
 # The command-line tool and nothing else. The plumbing it shares with
 # the family -- dispatch, --version, doctor, the output contract, man pages
-# and completions -- is am-fs-core's `cli` feature, turned on only here, so
+# and completions -- is rust-fs-core's `cli` feature, turned on only here, so
 # the static library gains nothing. clap is MIT/Apache-2.0.
-cli = ["dep:clap", "am-fs-core/cli"]
+cli = ["dep:clap", "rust-fs-core/cli"]
 # Enables the qemu-img cross-validation test binary. Off by default so
 # `cargo test` does not require qemu-img on PATH. CI installs qemu-utils
 # and runs `cargo test --features qemu-validation --test qemu_validation`
@@ -55,7 +60,7 @@ cli = ["dep:clap", "am-fs-core/cli"]
 qemu-validation = []
 
 [dependencies]
-am-fs-core = { path = "../rust-fs-core", version = "0.2.23" }
+rust-fs-core = { path = "../rust-fs-core", version = "0.3.0" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vmdk` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.

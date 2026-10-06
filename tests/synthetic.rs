@@ -19,8 +19,8 @@
 use std::fs::File;
 use std::sync::Arc;
 
-use vmdk::header::{offsets, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC};
-use vmdk::VmdkReader;
+use img_vmdk::header::{offsets, FLAG_ZEROED_GRAIN, GTE_ZEROED_GRAIN, HEADER_SIZE, MAGIC};
+use img_vmdk::VmdkReader;
 
 mod common;
 use common::{patch, TempPath, WriteAt};
@@ -144,7 +144,7 @@ fn a_stream_optimized_descriptor_over_an_uncompressed_header_is_refused() {
         .unwrap() as u64;
     common::patch(&path, DESC_OFF_SECTOR * SECTOR + at, b"streamOptimized\" ");
     match VmdkReader::open(&path) {
-        Err(vmdk::Error::Corrupt(msg)) => assert!(msg.contains("createType"), "{msg}"),
+        Err(img_vmdk::Error::Corrupt(msg)) => assert!(msg.contains("createType"), "{msg}"),
         Err(other) => panic!("refused for the wrong reason: {other}"),
         Ok(_) => panic!("a streamOptimized descriptor opened over a version 1 header"),
     }
@@ -336,7 +336,7 @@ fn read_past_end_errors() {
     let err = r
         .read_at(CAPACITY_SECTORS * SECTOR - 8, &mut buf)
         .unwrap_err();
-    assert!(matches!(err, vmdk::Error::OutOfBounds { .. }));
+    assert!(matches!(err, img_vmdk::Error::OutOfBounds { .. }));
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn rejects_non_monolithic_sparse() {
     drop(f);
 
     match VmdkReader::open(&path) {
-        Err(vmdk::Error::Unsupported(_)) => {}
+        Err(img_vmdk::Error::Unsupported(_)) => {}
         Err(other) => panic!("expected Unsupported, got {other}"),
         Ok(_) => panic!("expected Unsupported, got Ok"),
     }
@@ -423,7 +423,7 @@ fn a_descriptor_only_file_is_refused_by_its_create_type() {
         std::fs::write(&path, descriptor_file(create_type, extent)).unwrap();
 
         match VmdkReader::open(&path) {
-            Err(vmdk::Error::Unsupported(msg)) => assert!(
+            Err(img_vmdk::Error::Unsupported(msg)) => assert!(
                 msg.contains(create_type),
                 "the refusal must name the create type; for {create_type} it said {msg:?}"
             ),
@@ -446,7 +446,7 @@ fn a_sidecar_descriptor_for_a_sparse_extent_is_unsupported() {
     .unwrap();
 
     match VmdkReader::open(&path) {
-        Err(vmdk::Error::Unsupported(msg)) => assert!(
+        Err(img_vmdk::Error::Unsupported(msg)) => assert!(
             msg.contains("separate file"),
             "the refusal must say where the data is, got {msg:?}"
         ),
@@ -480,7 +480,7 @@ fn a_failed_read_of_a_descriptor_sized_file_is_an_io_error() {
     let dev: Arc<dyn fs_core::BlockRead> = Arc::new(FailingReads(size as u64));
 
     match VmdkReader::open_on_device(dev) {
-        Err(vmdk::Error::Io(e)) => assert!(
+        Err(img_vmdk::Error::Io(e)) => assert!(
             e.to_string().contains("simulated device read failure"),
             "the device's own error must survive, got {e}"
         ),
@@ -507,7 +507,7 @@ fn files_that_are_not_vmdks_still_say_so() {
         let path = tmp_path(name);
         std::fs::write(&path, &bytes).unwrap();
         match VmdkReader::open(&path) {
-            Err(vmdk::Error::NotVmdk) => {}
+            Err(img_vmdk::Error::NotVmdk) => {}
             Err(other) => panic!("{name}: expected NotVmdk, got {other}"),
             Ok(_) => panic!("{name}: opened a file that is not a VMDK"),
         }
@@ -543,7 +543,7 @@ fn a_create_type_line_alone_does_not_make_a_descriptor_file() {
         let path = tmp_path(&format!("not_desc_{name}"));
         std::fs::write(&path, text).unwrap();
         match VmdkReader::open(&path) {
-            Err(vmdk::Error::NotVmdk) => {}
+            Err(img_vmdk::Error::NotVmdk) => {}
             Err(other) => panic!("{name}: expected NotVmdk, got {other}"),
             Ok(_) => panic!("{name}: opened a file that is not a VMDK"),
         }
@@ -564,7 +564,7 @@ fn a_create_type_line_alone_does_not_make_a_descriptor_file() {
         let path = tmp_path(&format!("desc_{name}"));
         std::fs::write(&path, text).unwrap();
         match VmdkReader::open(&path) {
-            Err(vmdk::Error::Unsupported(msg)) => {
+            Err(img_vmdk::Error::Unsupported(msg)) => {
                 assert!(msg.contains("monolithicFlat"), "{name}: got {msg:?}")
             }
             Err(other) => {
@@ -640,7 +640,7 @@ fn a_read_only_open_refuses_to_write() {
         Arc::new(fs_core::FileDevice::open(&path).expect("open the fixture"));
     let r = VmdkReader::open_on_device(file).expect("open read-only");
     match r.write_at(0, &[0u8; 512]) {
-        Err(vmdk::Error::ReadOnly) => {}
+        Err(img_vmdk::Error::ReadOnly) => {}
         Ok(()) => panic!("a read-only open accepted a write"),
         Err(e) => panic!("a write to a read-only open gave {e:?}"),
     }
