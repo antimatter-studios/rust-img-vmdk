@@ -7,41 +7,17 @@ suitable for FFI from C/C++/Go/Swift.
 
 ## Status
 
-- [x] `monolithicSparse` (single file: header + embedded descriptor +
-      grain directory + grain tables + grain data)
-- [x] `BlockRead` + `BlockDevice` impl via `rust-fs-core` — generic over
-      any device, not just files
-- [x] C ABI: `vmdk_open` / `vmdk_open_rw` (path) and
-      `vmdk_open_on_device` / `vmdk_open_rw_on_device` (existing
-      `FsCoreDevice` handle)
-- [x] Write support (monolithicSparse): write-through to allocated
-      grains, allocate-on-write for sparse grains, allocate-on-write
-      for grain tables themselves. Crash-safety order is data →
-      grain-table → grain-directory (when growing) → flush.
-- [ ] `monolithicFlat` (single contiguous data file, descriptor in a
-      sidecar `.vmdk`)
-- [ ] `twoGbMaxExtentSparse` / `twoGbMaxExtentFlat` (split-extent
-      variants used for FAT32 hosts)
-- [x] `streamOptimized` (DEFLATE-compressed grains used by OVF),
-      **read-only**: grains are inflated through their markers, with the
-      grain directory taken from the header or, for a stream written in
-      one pass, the footer. Opening one read-write is refused -- a
-      rewritten grain compresses to a different length and cannot go
-      back where the old one was.
-- [ ] `vmfs` / `vmfsSparse` (ESXi-native; rarely seen outside ESXi). A
-      `vmfsSparse` extent carries the magic `COWD` rather than `KDMV` and
-      is refused by name rather than reported as not a VMDK.
-
-Variants other than `monolithicSparse` and `streamOptimized` return a clear "unsupported"
-error rather than misreading the image. That includes the ones whose
-file is a descriptor rather than a sparse extent -- `monolithicFlat` and
-the `twoGbMaxExtent*` pair have no `KDMV` magic anywhere, and are
-recognised by parsing the descriptor text and naming the `createType`.
-Only a file that is neither a sparse extent nor a parseable descriptor
-is reported as not a VMDK. So does a snapshot delta or
-linked clone: it *is* `monolithicSparse`, but its descriptor names a
-parent (`parentFileNameHint` / `parentCID`) and the grains it does not
-own live in that parent, so reading it standalone would return zeros.
+Reads `monolithicSparse` images, and `streamOptimized` ones (DEFLATE grains,
+read-only). Writes `monolithicSparse`, allocating grains and grain tables on
+write and keeping the redundant grain directory, the content identifier and
+`uncleanShutdown` in step. Every other layout is refused by name rather than
+misread: `monolithicFlat` and the `twoGbMaxExtent*` pair by the create type
+their descriptor names, an ESXi `vmfsSparse` extent by its `COWD` magic, and a
+snapshot delta or linked clone because its grains live in a parent. Every
+shape is checked against `qemu-img`. **[docs/features.md](docs/features.md) is
+the full list**: every feature, its state (supported, partial, refused, not
+supported or upcoming), the release it shipped in, its tracking issue and the
+test that checks it. Every pull request that changes behaviour updates it.
 
 ## Layout
 
