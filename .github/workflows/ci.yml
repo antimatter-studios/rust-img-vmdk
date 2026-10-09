@@ -105,7 +105,7 @@ jobs:
           # that answers `--version` the way tier.sh requires. #121 made
           # allocation ask for the room with set_len, so the library pin moved
           # to the number the tooling already needed (#123).
-          ref: v0.3.7
+          ref: v0.3.8
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
