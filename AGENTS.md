@@ -280,6 +280,32 @@ nothing is recopied. See rust-fs-core#153 and #212.
 **`OUTPUT_BUDGET_VERBOSE`, not `FLTH_VERBOSE`.** The canonical script does
 not read the old name, and setting it does nothing at all.
 
+## rust-fs-core comes from crates.io, not the sibling
+
+`Cargo.toml` and `fuzz/Cargo.toml` take `rust-fs-core` from the registry,
+at the version `Cargo.lock` records (#165). It used to be a `path`
+dependency on `../rust-fs-core`, and that made every build from a checkout,
+release tags included, fail without a core checkout beside it. Windows has no
+release tarball, so building from a checkout is the only way to get the tool
+there, and that build failed too. The `standalone` CI job checks this
+repository out alone on Linux and Windows and builds the tool, so a path
+dependency on a sibling cannot come back unnoticed.
+
+The `../rust-fs-core` checkout is still needed, for core's scripts (the
+tiers, the floors, packaging, semver) and for the `fs_core.h` that
+`chore staticlib` ships. Keep it at the tag the workflows pin, which is the
+version `Cargo.lock` resolves.
+
+To build against an unreleased core, override it on your machine only, in a
+`.cargo/config.toml` you do not commit:
+
+```toml
+[patch.crates-io]
+rust-fs-core = { path = "../rust-fs-core" }
+```
+
+Bump the version here once that core is published.
+
 ## What gates a merge
 
 One required check, `ci-ok`, declared in `.github-guard` and aggregating every
