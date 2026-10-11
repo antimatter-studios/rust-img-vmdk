@@ -6,6 +6,8 @@ never does.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-11
+
 ### Added
 
 - **`docs/features.md`, a features page kept current by every pull request.**
@@ -540,7 +542,8 @@ never does.
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/antimatter-studios/rust-img-vmdk/compare/v0.3.5...v0.4.0

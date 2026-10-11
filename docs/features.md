@@ -56,3 +56,4 @@ States:
 | `img.vmdk` `info`/`get`, `read`, `write` (`--features cli`) | Supported | 0.4.0 | | `cli_write.rs`, `tests/cli/test-info.sh`, `tests/cli/test-read.sh`, `tests/cli/test-write.sh` |
 | `img.vmdk` `create`, `resize`, `set` | Not supported (`not implemented`, exit 3) | 0.4.0 | | `tests/cli/test-unsupported.sh` |
 | `rust-img-vmdk doctor`, man pages, shell completions | Supported | 0.4.0 | | `tests/cli/test-names.sh`, `tests/cli/test-docs.sh` |
+| Building the tool from a checkout or a release tag with no other repository beside it, on Linux and Windows | Supported | 0.5.1 (#165) | | the `standalone` CI job |
