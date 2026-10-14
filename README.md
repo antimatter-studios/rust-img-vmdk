@@ -1,9 +1,11 @@
-# vmdk
+# rust-img-vmdk
 
 Pure-Rust reader for the VMware VMDK (Virtual Machine Disk) format.
 Implemented from VMware's published *Virtual Disk Format* technical
 note; no GPL code is copied or linked. Exposes a Rust API and a C ABI
 suitable for FFI from C/C++/Go/Swift.
+
+Published on crates.io as `rust-img-vmdk`; the library name is `img_vmdk`.
 
 ## Status
 
