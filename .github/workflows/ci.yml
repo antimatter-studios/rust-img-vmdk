@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.12
+          ref: v0.3.13
           path: rust-fs-core
       - name: Classify the change
         id: c
@@ -105,7 +105,7 @@ jobs:
           # that answers `--version` the way tier.sh requires. #121 made
           # allocation ask for the room with set_len, so the library pin moved
           # to the number the tooling already needed (#123).
-          ref: v0.3.11
+          ref: v0.3.13
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -212,7 +212,7 @@ jobs:
           repository: antimatter-studios/rust-fs-core
           # One checkout, the library AND the output-budget wrapper. See the
           # `test` job above for why it used to be two.
-          ref: v0.3.12
+          ref: v0.3.13
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -269,7 +269,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.12
+          ref: v0.3.13
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -309,6 +309,12 @@ jobs:
         # agent-core v6: a pull request adds changelog.d/<branch>.md rather
         # than editing CHANGELOG.md. Run directly, like the check above.
         run: bash ../rust-fs-core/scripts/changelog-check.sh
+      - name: unreleased features-page rows are fragments
+        working-directory: rust-img-vmdk
+        # rust-fs-core's docs/features-fragments.md: a pull request adds
+        # features.d/<branch>.md rather than editing docs/features.md. Run
+        # directly, like the two checks above.
+        run: bash ../rust-fs-core/scripts/features-check.sh
       # The shell tests, by glob, so a guard added later needs no edit here.
       - name: script tests (tests/scripts/*.sh)
         working-directory: rust-img-vmdk
@@ -343,7 +349,7 @@ jobs:
           repository: antimatter-studios/rust-fs-core
           # One checkout, the library AND the output-budget wrapper. See the
           # `test` job above for why it used to be two.
-          ref: v0.3.12
+          ref: v0.3.13
           path: rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -435,7 +441,7 @@ jobs:
           repository: antimatter-studios/rust-fs-core
           # One checkout, the library AND the output-budget wrapper. See the
           # `test` job above for why it used to be two.
-          ref: v0.3.12
+          ref: v0.3.13
           path: rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -579,7 +585,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.12
+          ref: v0.3.13
           path: rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
